@@ -1,0 +1,40 @@
+const MealSkip = require('../../Models/mealSkipModel');
+
+exports.skipMeal = async (req, res) => {
+    try {
+        const { date, mealType } = req.body; 
+        const userId = req.user.id;
+
+        // ✅ 11 PM CUT-OFF LOGIC
+        const now = new Date();
+        const targetDate = new Date(date);
+        const deadline = new Date(targetDate);
+        deadline.setDate(deadline.getDate() - 1); 
+        deadline.setHours(23, 0, 0, 0); 
+
+        if (now > deadline) {
+            return res.status(403).json({ 
+                success: false, 
+                message: "Too late! You must skip tomorrow's meals before 11 PM tonight." 
+            });
+        }
+
+        const monthName = targetDate.toLocaleString('default', { month: 'long', year: 'numeric' });
+        const newSkip = new MealSkip({ userId, date, mealType, month: monthName });
+        await newSkip.save();
+
+        res.status(201).json({ success: true, message: `${mealType} skipped successfully.` });
+    } catch (error) {
+        if (error.code === 11000) return res.status(400).json({ message: "Meal already skipped." });
+        res.status(500).json({ message: "Server error" });
+    }
+};
+
+exports.getMySkipHistory = async (req, res) => {
+    try {
+        const skips = await MealSkip.find({ userId: req.user.id }).sort({ date: -1 });
+        res.json({ success: true, skips });
+    } catch (e) {
+        res.status(500).json({ message: "Error" });
+    }
+};
