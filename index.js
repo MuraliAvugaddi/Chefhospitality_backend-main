@@ -1,75 +1,64 @@
+require('dotenv').config();
 const express = require('express');
-const mongoose = require("mongoose");
-const cors = require("cors");
-const dotenv = require("dotenv");
+const mongoose = require('mongoose');
+const cors = require('cors');
 const http = require('http');
 const { Server } = require("socket.io");
 
-// Your existing routes
-const authrouter = require("./Routes/UserRoutes/authRoute");
+// Import your existing routes
+//const authrouter = require('./routes/authRoute'); // Adjust paths if different
+const authrouter = require("./Routes/UserRoutes/authRoute"); // Adjust paths if different
+//const userRoute = require('./routes/userRoute');
 const userRoute = require('./Routes/UserRoutes/user_Routes');
-const adminRoute = require('./Routes/AdimeRoutes/adimeRoute.js');
-const tokenRoute = require('./Routes/UserRoutes/token_route.js');
-const historyRoute = require('./Routes/AdimeRoutes/historyRoute.js');
-
-dotenv.config();
-
+//const adminRoute = require('./routes/adminRoute');
+const adminRoute = require('./Routes/AdimeRoutes/adimeRoute');
+//const tokenRoute = require('./routes/tokenRoute');
+const tokenRoute = require('./Routes/UserRoutes/token_route');
+//const getTokenHistory = require('./routes/tokenHistory');
+const getTokenHistory = require('./Routes/AdimeRoutes/historyRoute');
 const app = express();
+
+// 1. Create HTTP Server for Socket.io
 const server = http.createServer(app);
 
+// 2. Initialize Socket.io with CORS for your Bridge
 const io = new Server(server, {
-    cors: { origin: "*", methods: ["GET", "POST"] }
+    cors: {
+        origin: "*", // Allows your laptop bridge to connect from anywhere
+        methods: ["GET", "POST"]
+    }
 });
 
-const PORT = process.env.PORT || 5000;
-
+// Middleware
 app.use(cors());
 app.use(express.json());
 
-// --- Updated Socket.IO Logic ---
-let userSockets = {};
+// 3. Make 'io' available to all your Routes/Controllers
+app.set('socketio', io);
 
+// Socket.io Connection Logic
 io.on('connection', (socket) => {
-    console.log(`⚡: A user connected with socket ID: ${socket.id}`);
-
-    // When user connects, they MUST send their userId to map the connection
-    socket.on('registerUser', (userId) => {
-        if (userId) {
-            userSockets[userId] = socket.id;
-            console.log(`User ${userId} is now online on socket ${socket.id}`);
-        }
-    });
-
+    console.log('⚡ A device connected to the bridge:', socket.id);
+    
     socket.on('disconnect', () => {
-        console.log(`🔥: A user disconnected with socket ID: ${socket.id}`);
-        // Clean up mapping on disconnect to avoid sending data to dead sockets
-        for (let userId in userSockets) {
-            if (userSockets[userId] === socket.id) {
-                delete userSockets[userId];
-                break;
-            }
-        }
+        console.log('❌ Device disconnected');
     });
 });
 
-// Middleware to make 'io' and 'userSockets' accessible in your controllers
-app.use((req, res, next) => {
-    req.io = io;
-    req.userSockets = userSockets;
-    next();
-});
-
-// --- ✅ REGISTER ALL ROUTES ---
+// Routes
 app.use('/api/auth', authrouter);
 app.use('/api', userRoute);
 app.use('/api/admin', adminRoute);
 app.use('/api/tokens', tokenRoute);
-app.use('/api/admin', historyRoute);
+app.use('/api/toeknHostory', getTokenHistory);
 
+// Database Connection
 mongoose.connect(process.env.MONGO_URI)
-    .then(() => console.log("Mongodb is connected successfully"))
-    .catch((error) => console.log(error));
+    .then(() => console.log("✅ MongoDB Connected Successfully"))
+    .catch((err) => console.log("❌ MongoDB Connection Error:", err));
 
-server.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server is connected Port at ${PORT}`);
+// 4. Start Server using 'server.listen' (CRITICAL for Socket.io)
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, () => {
+    console.log(`🚀 Server is running on port ${PORT}`);
 });
