@@ -1,77 +1,6 @@
 const Token = require('../../Models/tokenModel');
 const Counter = require('../../Models/counterModels');
 const User = require('../../Models/users'); 
-const ThermalPrinter = require("node-thermal-printer").printer;
-const PrinterTypes = require("node-thermal-printer").types;
-
-const PRINTER_BOYS_IP = '10.13.67.44'; 
-const PRINTER_GIRLS_IP = '10.13.xx.xx'; 
-
-const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
-/**
- * HELPER: Ultra-Fast Printing for High-Concurrency
- */
-const autoPrint = async (tokenData, userName, gender, attempt = 1) => {
-    const printerIp = gender === 'Male' ? PRINTER_BOYS_IP : PRINTER_GIRLS_IP;
-    const MAX_ATTEMPTS = 5; 
-
-    let printer = new ThermalPrinter({
-        type: PrinterTypes.EPSON,
-        interface: `tcp://${printerIp}:9100`, 
-        characterSet: 'PC437_USA',
-        removeSpecialCharacters: false,
-        timeout: 3000, // Reduced timeout for faster failure/retry cycles
-    });
-
-    try {
-        const isConnected = await printer.isPrinterConnected();
-        
-        if (!isConnected) {
-            if (attempt <= MAX_ATTEMPTS) {
-                // Random jitter (1.5s - 2.5s) to prevent all 50 students retrying at the same microsecond
-                const retryDelay = 1500 + Math.floor(Math.random() * 1000);
-                await wait(retryDelay); 
-                return autoPrint(tokenData, userName, gender, attempt + 1);
-            }
-            return console.error(`❌ Printer timed out for ${userName} after 5 tries.`);
-        }
-
-        // --- ULTRA COMPACT FAST DESIGN ---
-        printer.alignCenter();
-        printer.bold(true);
-        printer.println("CHEF HOSPITALITY"); 
-        printer.bold(false);
-        printer.println("--------------------------------");
-
-        printer.invert(true); 
-        printer.println(`  ${tokenData.mealType.toUpperCase()}  `);
-        printer.invert(false);
-        
-        printer.println("TOKEN NUMBER");
-        printer.setTextSize(2, 2); 
-        printer.bold(true);
-        printer.println(tokenData.tokenNumber.toString().padStart(3, '0'));
-        printer.setTextNormal();
-        printer.bold(false);
-        printer.println("--------------------------------");
-
-        // Single line for Name and Info to keep vertical height small
-        printer.println(userName.toUpperCase());
-        printer.println(`${tokenData.date} | ${new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}`);
-        
-        printer.bold(true);
-        printer.println("ENJOY YOUR MEAL!");
-        printer.bold(false);
-
-        // Standard cut (No extra feeding to save time/paper)
-        printer.cut();
-
-        await printer.execute();
-    } catch (error) {
-        console.error(`❌ Error printing for ${userName}:`, error.message);
-    }
-};
 
 /**
  * HELPER: Atomic Token Generator
@@ -110,8 +39,19 @@ exports.generateToken = async (req, res) => {
     const newToken = new Token({ userId, mealType, tokenNumber, date: today });
     await newToken.save();
     
-    // 4. Fire-and-Forget Print (This is the "Fast" part - no await)
-    autoPrint(newToken, user.name, user.gender);
+    // 4. BRIDGE TRIGGER: Send to Laptop for Printing
+    const io = req.app.get('socketio');
+    if (io) {
+        io.emit("print-token", {
+            tokenNumber: newToken.tokenNumber,
+            userName: user.name,
+            mealType: newToken.mealType,
+            gender: user.gender // Sent so bridge can decide which printer if needed
+        });
+        console.log(`📡 Socket emitted: Print request for ${user.name}`);
+    } else {
+        console.error("❌ Socket.io not initialized on server");
+    }
 
     // 5. Instantly tell the Student App it's done
     res.status(201).json({ 
@@ -126,7 +66,7 @@ exports.generateToken = async (req, res) => {
   }
 };
 
-// ... History and Stats remain the same ...
+// --- History and Stats ---
 exports.getStatsByDate = async (req, res) => {
     try {
         const date = req.query.date || new Date().toISOString().slice(0, 10);
