@@ -1,73 +1,68 @@
 const Token = require('../../Models/tokenModel');
-// ✅ SCALABILITY FIX: Import the Counter model for atomic operations.
 const Counter = require('../../Models/counterModels');
+const User = require('../../Models/users'); 
 
 /**
- * HELPER: Atomic Token Number Generator
- * Uses a dedicated counter document to prevent duplicate token numbers
- * during high-concurrency requests.
+ * HELPER: Atomic Token Generator
  */
 const getNextTokenNumber = async (mealType, date) => {
-    // Each meal on each day gets its own unique counter document (e.g., "breakfast_2026-02-10")
     const sequenceName = `${mealType.toLowerCase()}_${date}`;
-    
-    // findByIdAndUpdate is "atomic" - it locks the row while updating to prevent race conditions.
     const counter = await Counter.findByIdAndUpdate(
         sequenceName,
         { $inc: { seq: 1 } },
-        { new: true, upsert: true } // Creates the counter if it doesn't exist yet
+        { new: true, upsert: true }
     );
     return counter.seq;
 };
 
-// 1. GENERATE TOKEN
+// --- MAIN CONTROLLER ---
 exports.generateToken = async (req, res) => {
   try {
     const { mealType } = req.body;
-    const userId = req.user.id;
+    const userId = req.user.id; 
 
-    // Time validation logic
-    const now = new Date();
-    const hour = now.getHours();
-    const minute = now.getMinutes();
-    const currentTimeInMinutes = hour * 60 + minute;
-
-    let isValidTime = false;
-    switch (mealType) {
-        // Validation windows (adjust these values for production)
-        case "Breakfast": isValidTime = currentTimeInMinutes >= 470 && currentTimeInMinutes <= 1290; break;
-        case "Lunch":     isValidTime = currentTimeInMinutes >= 470 && currentTimeInMinutes <= 1290; break;
-        case "Snacks":    isValidTime = currentTimeInMinutes >= 470 && currentTimeInMinutes <= 1290; break;
-        case "Dinner":    isValidTime = currentTimeInMinutes >= 470 && currentTimeInMinutes <= 1290; break;
-    }
-
-    if (!isValidTime) {
-      return res.status(403).json({ success: false, message: `The window for ${mealType} is closed.` });
-    }
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ success: false, message: "User not found." });
 
     const today = new Date().toISOString().slice(0, 10);
 
-    // Prevent duplicate tokens for the same user/meal/day
+    // 1. Check for duplicates (Fast)
     const existingToken = await Token.findOne({ userId, mealType, date: today });
     if (existingToken) {
-        return res.status(409).json({ success: false, message: `You have already generated a ${mealType} token today.` });
+        return res.status(409).json({ success: false, message: `Already have a token for ${mealType}.` });
     }
     
-    // Get the next sequential number atomically
+    // 2. Generate Number (Fast Atomic Operation)
     const tokenNumber = await getNextTokenNumber(mealType, today);
 
+    // 3. Save Record
     const newToken = new Token({ userId, mealType, tokenNumber, date: today });
     await newToken.save();
     
-    res.status(201).json({ success: true, token: newToken });
+    // 4. BRIDGE TRIGGER: Send to Laptop for Printing
+    const io = req.app.get('socketio');
+    if (io) {
+        io.emit("print-token", {
+            tokenNumber: newToken.tokenNumber,
+            userName: user.name,
+            mealType: newToken.mealType,
+            gender: user.gender // Sent so bridge can decide which printer if needed
+        });
+        console.log(`📡 Socket emitted: Print request for ${user.name}`);
+    } else {
+        console.error("❌ Socket.io not initialized on server");
+    }
+
+    // 5. Instantly tell the Student App it's done
+    res.status(201).json({ 
+        success: true, 
+        message: "Token generated! Collect your slip.",
+        token: newToken 
+    });
 
   } catch (error) {
-    // Handle MongoDB unique constraint errors
-    if (error.code === 11000) {
-        return res.status(409).json({ success: false, message: `Duplicate token detected.` });
-    }
-    console.error("Token Generation Error:", error);
-    res.status(500).json({ success: false, message: 'Server error while generating token.' });
+    console.error("Token Error:", error);
+    res.status(500).json({ success: false, message: 'Server error.' });
   }
 };
 
@@ -109,28 +104,20 @@ exports.getUserTokenHistory = async (req, res) => {
 // 3. ADMIN: GET STATS BY DATE
 exports.getStatsByDate = async (req, res) => {
     try {
-        // Allows admin to query specific dates like ?date=2026-02-10
         const date = req.query.date || new Date().toISOString().slice(0, 10);
-
         const stats = await Token.aggregate([
             { $match: { date: date } },
             { $group: { _id: '$mealType', count: { $sum: 1 } } }
         ]);
+        const formatted = { "Breakfast": 0, "Lunch": 0, "Snacks": 0, "Dinner": 0 };
+        stats.forEach(item => { formatted[item._id] = item.count; });
+        res.status(200).json(formatted);
+    } catch (e) { res.status(500).json({ message: 'Error' }); }
+};
 
-        // Default structure to ensure all meals are represented even if count is 0
-        const formattedStats = { "Breakfast": 0, "Lunch": 0, "Snacks": 0, "Dinner": 0 };
-        
-        stats.forEach(item => {
-            if (item._id && formattedStats.hasOwnProperty(item._id)) {
-                formattedStats[item._id] = item.count;
-            }
-        });
-        
-        res.status(200).json(formattedStats);
-    } catch (error) {
-        console.error("Stats Fetch Error:", error);
-        res.status(500).json({ success: false, message: 'Server error while fetching stats.' });
-    }
-
-
+exports.getUserTokenHistory = async (req, res) => {
+    try {
+        const history = await Token.find({ userId: req.user.id }).sort({ generatedAt: -1 }).limit(15);
+        res.status(200).json({ success: true, history });
+    } catch (e) { res.status(500).json({ message: "Error" }); }
 };
