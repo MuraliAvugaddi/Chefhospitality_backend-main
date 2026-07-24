@@ -72,20 +72,28 @@ exports.generateToken = async (req, res) => {
 };
 
 // 2. GET USER-SPECIFIC HISTORY (With Pagination)
+// 2. GET USER-SPECIFIC HISTORY (With Pagination & Optional Month Filter)
 exports.getUserTokenHistory = async (req, res) => {
     try {
-        const userId = req.user.id; // From Auth Middleware
+        const userId = req.user.id; 
         const page = parseInt(req.query.page) || 1;
         const limit = 15;
         const skip = (page - 1) * limit;
+        const monthQuery = req.query.month; // Format: "YYYY-MM"
 
-        // Fetch tokens for this user, sorted by newest first
-        const history = await Token.find({ userId })
+        let query = { userId };
+        
+        // If a month is specified, filter by date prefix (e.g., "2026-06")
+        if (monthQuery) {
+            query.date = { $regex: `^${monthQuery}` };
+        }
+
+        const history = await Token.find(query)
             .sort({ generatedAt: -1 }) 
             .skip(skip)
             .limit(limit);
 
-        const totalCount = await Token.countDocuments({ userId });
+        const totalCount = await Token.countDocuments(query);
 
         res.status(200).json({
             success: true,
@@ -98,7 +106,6 @@ exports.getUserTokenHistory = async (req, res) => {
         res.status(500).json({ success: false, message: "Error fetching history" });
     }
 };
-
 // 3. ADMIN: GET STATS BY DATE
 exports.getStatsByDate = async (req, res) => {
     try {

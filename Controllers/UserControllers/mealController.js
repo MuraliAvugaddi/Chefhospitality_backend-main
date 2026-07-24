@@ -32,9 +32,24 @@ exports.skipMeal = async (req, res) => {
 
 exports.getMySkipHistory = async (req, res) => {
     try {
-        const skips = await MealSkip.find({ userId: req.user.id }).sort({ date: -1 });
+        const { month, page = 1 } = req.query;
+        const query = { userId: req.user.id };
+        
+        // Filter by month name if provided (e.g., "May 2026")
+        if (month) {
+            query.month = month;
+        }
+
+        const limit = 15;
+        const skip = (parseInt(page) - 1) * limit;
+
+        const skips = await MealSkip.find(query)
+            .sort({ date: -1 })
+            .skip(skip)
+            .limit(limit);
+
         res.json({ success: true, skips });
     } catch (e) {
-        res.status(500).json({ message: "Error" });
+        res.status(500).json({ message: "Error loading skip history" });
     }
 };

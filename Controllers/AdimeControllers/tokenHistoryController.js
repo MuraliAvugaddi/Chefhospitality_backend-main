@@ -35,7 +35,6 @@ exports.getUserTokenHistory = async (req, res) => {
 exports.getTokenHistory = async (req, res) => {
   try {
     // 1. Extract query parameters with defaults
-    // ✅ Added 'date' to destructured parameters
     const { page = 1, limit = 20, mealType, date } = req.query; 
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
@@ -47,9 +46,9 @@ exports.getTokenHistory = async (req, res) => {
       matchQuery.mealType = mealType;
     }
     
-    // ✅ NEW: Filter by specific date string (e.g., "2026-02-15")
+    // ✅ Updated: Use a regex to prevent minor string mismatch issues with dates
     if (date) {
-      matchQuery.date = date; 
+      matchQuery.date = { $regex: new RegExp("^" + date) }; 
     }
 
     // 3. Build the aggregation pipeline
@@ -62,7 +61,7 @@ exports.getTokenHistory = async (req, res) => {
 
     pipeline.push(
       { $sort: { generatedAt: -1 } }, // Newest logs first
-      { $skip: skip },               // Pagination skip
+      { $skip: skip },                  // Pagination skip
       { $limit: parseInt(limit) },   // Pagination limit
       {
         $lookup: {

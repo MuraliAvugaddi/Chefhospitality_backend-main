@@ -1,5 +1,4 @@
 const mongoose = require("mongoose");
-const bcrypt = require("bcryptjs");
 
 const userSchema = new mongoose.Schema({
     name: {
@@ -21,9 +20,10 @@ const userSchema = new mongoose.Schema({
             message: "Please enter a valid email address."
         }
     },
+    // ✅ CHANGED: Password is no longer strictly required for Google users
     password: {
         type: String,
-        required: true
+        required: false
     },
     enrollmentNo: {
         type: String,
@@ -48,28 +48,25 @@ const userSchema = new mongoose.Schema({
     gender: {
         type: String,
     },
-    // NEW FIELD: Tracks when the user's access ends
     accessExpiresAt: {
         type: Date,
-        default: null // null means no active subscription/payment yet
+        default: null
     },
-    // Keep this if you want manual admin control, 
-    // otherwise, you can remove it and rely solely on accessExpiresAt
     isApproved: {
         type: Boolean,
         default: false 
     }
 }, { timestamps: true });
 
-// Password hashing middleware
+// Password hashing middleware (only runs if password exists and is modified)
 userSchema.pre("save", async function (next) {
-    if (!this.isModified("password")) {
+    if (!this.password || !this.isModified("password")) {
         return next();
     }
+    const bcrypt = require("bcryptjs");
     this.password = await bcrypt.hash(this.password, 12);
     next();
 });
 
 const User = mongoose.model("User", userSchema);
-
 module.exports = User;

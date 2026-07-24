@@ -23,8 +23,6 @@ const tokenSchema = new mongoose.Schema({
   generatedAt: {
     type: Date,
     default: Date.now,
-    // ✅ Updated: Automatically deletes after 32 days (2,764,800 seconds)
-    expires: 2764800,
   },
 });
 

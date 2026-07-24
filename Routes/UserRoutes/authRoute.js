@@ -1,21 +1,26 @@
 const express = require('express'); 
 const router = express.Router();
 
-// Import the specific functions from your middleware file
 const { auth } = require("../../Middelware/auth");
 const authcontroller = require('../../Controllers/UserControllers/authControllers');
 
-// Step 1: Validates email availability (No user created yet)
+// Step 1: Validates email availability & Sends OTP code
 router.post("/signup/1", authcontroller.siginuppage1);
 
-// ✅ FIX: Remove 'auth' from this route. 
-// This route now receives ALL data and creates the user for the first time.
+// New Endpoint: Verify OTP match
+router.post("/signup/verify-otp", authcontroller.verifyOTP);
+
+// Step 2: Receive all user detail objects and create account
 router.post("/signup/2", authcontroller.siginuppage2); 
 
 // Standard Signin
 router.post("/signin", authcontroller.signinUser);
 
-// This still needs auth because the user must be logged in to verify a payment
+// Online Payment
 router.post("/payment-success", auth, authcontroller.handleOnlinePaymentSuccess);
+
+// Forgot and Reset Password routes
+router.post("/forgot-password", authcontroller.forgotPassword);
+router.post("/reset-password", authcontroller.resetPassword);
 
 module.exports = router;
