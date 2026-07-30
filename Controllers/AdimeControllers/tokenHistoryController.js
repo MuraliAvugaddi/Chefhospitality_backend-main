@@ -1,18 +1,16 @@
-// ✨ SOLUTION: Make sure these import lines are at the top of your file!
 const User = require('../../Models/users');
-const Token = require('../../Models/tokenModel'); // <-- This was the missing line
-
+const Token = require('../../Models/tokenModel');
 
 // GET USER-SPECIFIC HISTORY
 exports.getUserTokenHistory = async (req, res) => {
     try {
-        const userId = req.user.id; // From Auth Middleware
+        const userId = req.user.id;
         const page = parseInt(req.query.page) || 1;
         const limit = 15;
         const skip = (page - 1) * limit;
 
         const history = await Token.find({ userId })
-            .sort({ generatedAt: -1 }) // Newest first
+            .sort({ generatedAt: -1 })
             .skip(skip)
             .limit(limit);
 
@@ -29,80 +27,71 @@ exports.getUserTokenHistory = async (req, res) => {
     }
 };
 
-
-
-// Function to get paginated token generation history
+// Function to get paginated token generation history for Admin
 exports.getTokenHistory = async (req, res) => {
   try {
-    // 1. Extract query parameters with defaults
     const { page = 1, limit = 20, mealType, date } = req.query; 
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
-    // 2. Build the matching query for filters
     const matchQuery = {};
     
-    // Filter by Meal Type (Breakfast, Lunch, etc.)
+    // ✅ Fix: Use capitalized 'mealType' to precisely match your MongoDB database schema documents
     if (mealType && mealType !== 'All') {
-      matchQuery.mealType = mealType;
+      matchQuery.mealType = { $regex: new RegExp("^" + mealType + "$", "i") }; // Case-insensitive match
     }
     
-    // ✅ Updated: Use a regex to prevent minor string mismatch issues with dates
     if (date) {
       matchQuery.date = { $regex: new RegExp("^" + date) }; 
     }
 
-    // 3. Build the aggregation pipeline
     const pipeline = [];
 
-    // Always start with $match for performance if filters exist
     if (Object.keys(matchQuery).length > 0) {
       pipeline.push({ $match: matchQuery });
     }
 
     pipeline.push(
-      { $sort: { generatedAt: -1 } }, // Newest logs first
-      { $skip: skip },                  // Pagination skip
-      { $limit: parseInt(limit) },   // Pagination limit
+      { $sort: { generatedAt: -1 } },
+      { $skip: skip },
+      { $limit: parseInt(limit) },
       {
         $lookup: {
-          from: 'users',             // Collection name in MongoDB
+          from: 'users',
           localField: 'userId',
           foreignField: '_id',
           as: 'userDetails',
         },
       },
-      { $unwind: '$userDetails' },   // Flatten user array
+      { $unwind: { path: '$userDetails', preserveNullAndEmptyArrays: true } },
       {
         $project: {
           _id: 0,
           tokenNumber: 1,
-          mealType: 1,
+          mealType: { $ifNull: ['$mealType', 'Unknown'] }, // ✅ Project capital 'mealType' correctly
           date: 1,
           generatedAt: 1,
-          name: '$userDetails.name',
-          enrollmentNo: '$userDetails.enrollmentNo',
-          year: '$userDetails.year',
-          room: '$userDetails.room',
+          name: { $ifNull: ['$userDetails.name', 'Unknown User'] },
+          enrollmentNo: { $ifNull: ['$userDetails.enrollmentNo', 'N/A'] },
+          year: { $ifNull: ['$userDetails.year', 0] },
+          room: { $ifNull: ['$userDetails.room', 0] },
         },
       }
     );
 
-    // 4. Execute database operations
     const [history, totalCount] = await Promise.all([
       Token.aggregate(pipeline),
-      Token.countDocuments(matchQuery) // Correct count for filtered pagination
+      Token.countDocuments(matchQuery)
     ]);
 
-    // 5. Send standardized response
     res.status(200).json({
       success: true,
-      totalPages: Math.ceil(totalCount / parseInt(limit)),
+      totalPages: Math.ceil(totalCount / parseInt(limit)) || 1,
       currentPage: parseInt(page),
       history: history,
     });
     
   } catch (error) {
-    console.error('Error fetching token history:', error); 
+    console.error('Error fetching admin token history:', error); 
     res.status(500).json({ 
       success: false, 
       message: 'Server error while fetching token history.' 

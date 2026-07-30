@@ -16,8 +16,13 @@ router.post("/signup/2", authcontroller.siginuppage2);
 // Standard Signin
 router.post("/signin", authcontroller.signinUser);
 
-// Online Payment
+// Payment History & Verification Routes
+router.get("/payment-history", auth, authcontroller.getPaymentHistory);
 router.post("/payment-success", auth, authcontroller.handleOnlinePaymentSuccess);
+
+// ✅ Cashfree Payment Gateway Routes
+router.post("/create-cashfree-order", auth, authcontroller.createCashfreeOrder);
+router.post("/verify-cashfree-payment", auth, authcontroller.verifyCashfreePayment);
 
 // Forgot and Reset Password routes
 router.post("/forgot-password", authcontroller.forgotPassword);

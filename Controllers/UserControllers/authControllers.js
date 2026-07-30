@@ -1,43 +1,60 @@
-// ✅ FORCE LOAD ENVIRONMENT VARIABLES FIRST
 require('dotenv').config();
-
 const User = require("../../Models/users");
 const OTP = require("../../Models/otpModel"); 
 const Payment = require("../../Models/paymentModel"); 
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 
-// 1. Switch from Nodemailer to Resend
-const { Resend } = require('resend');
+// ✅ BREVO TRANSACTIONAL EMAIL HELPER (Uses native fetch)
+const sendBrevoEmail = async (recipientEmail, subject, htmlContent, textContent) => {
+    const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+        method: 'POST',
+        headers: {
+            'accept': 'application/json',
+            'api-key': process.env.BREVO_API_KEY,
+            'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+            sender: { 
+                name: "Chef Hospaitality Services OTP", 
+                email: "venkatavugaddi@gmail.com" 
+            },
+            to: [{ email: recipientEmail }],
+            subject: subject,
+            htmlContent: htmlContent,
+            textContent: textContent
+        })
+    });
 
-// Make sure to add RESEND_API_KEY to your .env file!
-const resend = new Resend(process.env.RESEND_API_KEY);
+    if (!response.ok) {
+        const errData = await response.json();
+        throw new Error(errData.message || 'Failed to send email via Brevo');
+    }
+    return await response.json();
+};
 
-// ✅ SCALABLE PRODUCTION EMAIL LOGIC (Uses your verified domain)
+// ✅ SCALABLE PRODUCTION EMAIL LOGIC (Uses Brevo)
 const sendOtpEmail = async (email, otp) => {
     try {
-        await resend.emails.send({
-            // ✅ UPDATED: Using your verified custom domain
-            from: 'Chef Mess App <otp@letsspeakglobal.com>',
-            to: email,
-            subject: `${otp} is your verification code for Chef Mess App`, 
-            text: `Hello! Thank you for starting your registration for Chef Hospitality Services. Your 6-digit verification OTP is: ${otp}. This code is valid for 10 minutes. Please do not share this code with anyone.`, 
-            html: `
-                <div style="font-family: Arial, sans-serif; padding: 20px; max-width: 500px; margin: 0 auto;">
-                    <h2 style="color: #FFC800; text-align: center;">Chef Hospitality Services</h2>
-                    <p>Thank you for registering with Chef Hospitality. Please use the one-time verification code below to complete registration Step 1:</p>
-                    <div style="text-align: center; margin: 30px 0;">
-                        <span style="font-size: 32px; font-weight: bold; letter-spacing: 5px; background: #FFF9E6; padding: 10px 20px; border: 1px solid #FFE480; border-radius: 5px;">
-                            ${otp}
-                        </span>
-                    </div>
-                    <p style="color: #777; font-size: 12px; text-align: center;">This code is valid for 10 minutes. If you didn't request this code, you can safely ignore this email.</p>
+        const subject = `${otp} is your verification code for Chef Mess App`;
+        const text = `Hello! Thank you for starting your registration for Chef Hospitality Services. Your 6-digit verification OTP is: ${otp}. This code is valid for 10 minutes. Please do not share this code with anyone.`;
+        const html = `
+            <div style="font-family: Arial, sans-serif; padding: 20px; max-width: 500px; margin: 0 auto;">
+                <h2 style="color: #FFC800; text-align: center;">Chef Hospitality Services</h2>
+                <p>Thank you for registering with Chef Hospitality. Please use the one-time verification code below to complete registration Step 1:</p>
+                <div style="text-align: center; margin: 30px 0;">
+                    <span style="font-size: 32px; font-weight: bold; letter-spacing: 5px; background: #FFF9E6; padding: 10px 20px; border: 1px solid #FFE480; border-radius: 5px;">
+                        ${otp}
+                    </span>
                 </div>
-            `
-        });
-        console.log(`✨ Registration OTP email successfully dispatched to ${email}`);
+                <p style="color: #777; font-size: 12px; text-align: center;">This code is valid for 10 minutes. If you didn't request this code, you can safely ignore this email.</p>
+            </div>
+        `;
+
+        await sendBrevoEmail(email, subject, html, text);
+        console.log(`✨ Registration OTP email successfully dispatched to ${email} via Brevo`);
     } catch (error) {
-        console.error("❌ High-traffic mailer failed:", error);
+        console.error("❌ Brevo mailer failed:", error);
         throw new Error("Failed to deliver verification code.");
     }
 };
@@ -81,17 +98,14 @@ const verifyOTP = async (req, res) => {
 };
 
 // 2. SIGNUP STEP 2
-// 2. SIGNUP STEP 2
 const siginuppage2 = async (req, res) => {
     try {
         const { name, email, password, enrollmentNo, course, year, phonenumber, hostelblock, room, gender } = req.body;
         
-        // Validate that all required text fields and options are present
         if (!name || !email || !password || !enrollmentNo || !course || !year || !phonenumber || !hostelblock || !room || !gender) {
             return res.status(400).json({ message: "All text fields and gender selection are required." });
         }
 
-        // ✅ Updated backend validation for enrollment length
         if (enrollmentNo.trim().length < 7) {
             return res.status(400).json({ message: "Enrollment number must be at least 7 characters long." });
         }
@@ -127,7 +141,7 @@ const signinUser = async (req, res) => {
     }
 };
 
-// 4. FORGOT PASSWORD - SENDS RESET OTP VIA RESEND
+// 4. FORGOT PASSWORD
 const forgotPassword = async (req, res) => {
     try {
         const { email } = req.body;
@@ -140,25 +154,21 @@ const forgotPassword = async (req, res) => {
         await OTP.deleteMany({ email });
         await OTP.create({ email, otp });
 
-        // ✅ UPDATED: Using your verified custom domain
-        await resend.emails.send({
-            from: 'Chef Mess App <otp@letsspeakglobal.com>',
-            to: email,
-            subject: `${otp} is your password reset code`,
-            text: `Use the confirmation code to reset your password: ${otp}`,
-            html: `
-                <div style="font-family: Arial, sans-serif; padding: 20px; max-width: 500px; margin: 0 auto;">
-                    <h2 style="color: #FFC800; text-align: center;">Password Reset Request</h2>
-                    <p>Use the confirmation code below to reset your password:</p>
-                    <div style="text-align: center; margin: 30px 0;">
-                        <span style="font-size: 32px; font-weight: bold; letter-spacing: 5px; background: #FFF9E6; padding: 10px 20px; border: 1px solid #FFE480; border-radius: 5px;">
-                            ${otp}
-                        </span>
-                    </div>
+        const subject = `${otp} is your password reset code`;
+        const text = `Use the confirmation code to reset your password: ${otp}`;
+        const html = `
+            <div style="font-family: Arial, sans-serif; padding: 20px; max-width: 500px; margin: 0 auto;">
+                <h2 style="color: #FFC800; text-align: center;">Password Reset Request</h2>
+                <p>Use the confirmation code below to reset your password:</p>
+                <div style="text-align: center; margin: 30px 0;">
+                    <span style="font-size: 32px; font-weight: bold; letter-spacing: 5px; background: #FFF9E6; padding: 10px 20px; border: 1px solid #FFE480; border-radius: 5px;">
+                        ${otp}
+                    </span>
                 </div>
-            `
-        });
+            </div>
+        `;
 
+        await sendBrevoEmail(email, subject, html, text);
         res.status(200).json({ message: "Password reset OTP sent to your email." });
     } catch (error) {
         console.error("Forgot password error:", error);
@@ -166,17 +176,9 @@ const forgotPassword = async (req, res) => {
     }
 };
 
-// 5. RESET PASSWORD - UPDATES PASSWORD IN DB WITH DIAGNOSTIC LOGGING
+// 5. RESET PASSWORD
 const resetPassword = async (req, res) => {
     try {
-        // ✅ DIAGNOSTIC LOGS: Instantly prints key parameters to your Node server terminal
-        console.log("------------------------------------");
-        console.log("📥 RECEIVED RESET PASSWORD REQUEST:");
-        console.log("👉 email:", req.body.email);
-        console.log("👉 otp:", req.body.otp);
-        console.log("👉 newPassword:", req.body.newPassword);
-        console.log("------------------------------------");
-
         const { email, otp, newPassword } = req.body;
         if (!email || !otp || !newPassword) {
             return res.status(400).json({ message: "All fields are required." });
@@ -188,7 +190,6 @@ const resetPassword = async (req, res) => {
         const user = await User.findOne({ email });
         if (!user) return res.status(404).json({ message: "User not found." });
 
-        // Schema pre-save middleware encrypts this securely before storage
         user.password = newPassword;
         await user.save();
         await OTP.deleteOne({ email });
@@ -210,21 +211,111 @@ const getPaymentHistory = async (req, res) => {
     }
 };
 
-const handleOnlinePaymentSuccess = async (req, res) => {
+// 6. CREATE CASHFREE ORDER (Live Production Endpoint)
+const createCashfreeOrder = async (req, res) => {
     try {
         const userId = req.user.id;
-        const { paymentId } = req.body;
-        if (!paymentId) return res.status(400).json({ message: "Payment ID missing." });
+        const user = await User.findById(userId);
+        if (!user) return res.status(404).json({ message: "User not found." });
+
+        const orderId = "chef_order_" + Date.now();
+        const amount = 4080; // ₹4,000 + 2% GST
+
+        const response = await fetch('https://api.cashfree.com/pg/orders', { 
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-client-id': process.env.CASHFREE_CLIENT_ID,
+                'x-client-secret': process.env.CASHFREE_CLIENT_SECRET,
+                'x-api-version': '2023-08-01'
+            },
+            body: JSON.stringify({
+                order_id: orderId,
+                order_amount: amount,
+                order_currency: "INR",
+                customer_details: {
+                    customer_id: user._id.toString(),
+                    customer_phone: user.phonenumber || "9999999999",
+                    customer_email: user.email
+                }
+            })
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+            return res.status(400).json({ success: false, message: data.message || "Failed to create Cashfree order." });
+        }
+
+        res.status(200).json({ 
+            success: true, 
+            orderId: data.order_id, 
+            paymentSessionId: data.payment_session_id 
+        });
+    } catch (error) {
+        console.error("Cashfree order error:", error); 
+        res.status(500).json({ message: "Server error while creating payment order." });
+    }
+};
+
+// 7. VERIFY CASHFREE PAYMENT & UPDATE USER + HISTORY (Live Production Endpoint)
+const verifyCashfreePayment = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { orderId } = req.body;
+
+        if (!orderId) return res.status(400).json({ message: "Order ID missing." });
+
+        const response = await fetch(`https://api.cashfree.com/pg/orders/${orderId}`, { 
+            method: 'GET',
+            headers: {
+                'x-client-id': process.env.CASHFREE_CLIENT_ID,
+                'x-client-secret': process.env.CASHFREE_CLIENT_SECRET,
+                'x-api-version': '2023-08-01'
+            }
+        });
+
+        const orderData = await response.json();
+        if (!response.ok || orderData.order_status !== "PAID") {
+            return res.status(400).json({ success: false, message: "Payment not completed or verified." });
+        }
+
+        const amountPaid = orderData.order_amount;
+        const transactionId = orderData.cf_payment_id?.toString() || orderId;
 
         const now = new Date();
+        const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+        const currentMonthString = `${monthNames[now.getMonth()]} ${now.getFullYear()}`;
+
+        const existingPayment = await Payment.findOne({ transactionId });
+        if (!existingPayment) {
+            await Payment.create({
+                userId,
+                amount: amountPaid,
+                method: 'online',
+                transactionId: transactionId,
+                month: currentMonthString,
+                status: 'Success',
+                paidAt: now
+            });
+        }
+
         const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
 
-        const updatedUser = await User.findByIdAndUpdate(userId, { isApproved: true, accessExpiresAt: lastDayOfMonth }, { new: true }).select('-password');
-        res.status(200).json({ success: true, user: updatedUser });
+        const updatedUser = await User.findByIdAndUpdate(
+            userId, 
+            { isApproved: true, accessExpiresAt: lastDayOfMonth }, 
+            { new: true }
+        ).select('-password');
+
+        res.status(200).json({ success: true, message: "Payment verified successfully!", user: updatedUser });
     } catch (error) {
+        console.error("Cashfree verification error:", error);
         res.status(500).json({ message: "Server error during payment verification." });
     }
 };
+
+// ✅ BACKWARDS COMPATIBILITY ALIAS TO PREVENT ROUTE CRASHES
+const handleOnlinePaymentSuccess = verifyCashfreePayment;
 
 module.exports = { 
     siginuppage1, 
@@ -234,5 +325,7 @@ module.exports = {
     forgotPassword,
     resetPassword,
     getPaymentHistory, 
-    handleOnlinePaymentSuccess 
+    handleOnlinePaymentSuccess,
+    createCashfreeOrder,
+    verifyCashfreePayment 
 };

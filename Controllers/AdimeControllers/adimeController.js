@@ -46,13 +46,33 @@ const updateUserStatus = async (req, res) => {
 };
 
 // 3. Fetch Global Payment History with Gender Filtering
+// Inside adimeController.js (or wherever verifyCashfreePayment resides)
+
+// 3. Fetch Global Monthly Payment History (Excluding Day Scholar micro-orders)
 const getAllPayments = async (req, res) => {
     try {
-        const { month, gender } = req.query;
-        let query = { month: month };
+        let { month, gender, date } = req.query;
 
+        if ((!month || month === 'All') && !date) {
+            const now = new Date();
+            const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+            month = `${monthNames[now.getMonth()]} ${now.getFullYear()}`;
+        }
+
+        let query = {};
+        if (date) {
+            const startDate = new Date(date);
+            startDate.setHours(0, 0, 0, 0);
+            const endDate = new Date(date);
+            endDate.setHours(23, 59, 59, 999);
+            query.paidAt = { $gte: startDate, $lte: endDate };
+        } else if (month) {
+            query.month = month;
+        }
+
+        // Only query standard subscription payments (e.g. ₹4000 or offline entries)
         let payments = await Payment.find(query)
-            .populate('userId', 'name enrollmentNo gender')
+            .populate('userId', 'name enrollmentNo gender year room phonenumber')
             .sort({ paidAt: -1 });
 
         if (gender && gender !== 'All') {
@@ -62,6 +82,22 @@ const getAllPayments = async (req, res) => {
         res.status(200).json(payments);
     } catch (error) {
         res.status(500).json({ message: "Failed to sync payment records" });
+    }
+};
+// Backend endpoint update for Admin collection separation by meal type if required:
+const getDayScholarRevenue = async (req, res) => {
+    try {
+        const { month, mealType } = req.query;
+        let query = { month };
+        if (mealType && mealType !== 'All') query.mealType = mealType;
+
+        const orders = await DayScholarOrder.find(query)
+            .populate('userId', 'name enrollmentNo year room phonenumber')
+            .sort({ orderedAt: -1 });
+
+        res.status(200).json(orders);
+    } catch (e) {
+        res.status(500).json({ message: "Error fetching records" });
     }
 };
 

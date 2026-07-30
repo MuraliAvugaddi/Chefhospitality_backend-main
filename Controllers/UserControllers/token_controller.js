@@ -46,7 +46,7 @@ exports.generateToken = async (req, res) => {
             tokenNumber: newToken.tokenNumber,
             userName: user.name,
             mealType: newToken.mealType,
-            gender: user.gender // Sent so bridge can decide which printer if needed
+            gender: user.gender
         });
         console.log(`📡 Socket emitted: Print request for ${user.name}`);
     } else {
@@ -66,7 +66,6 @@ exports.generateToken = async (req, res) => {
   }
 };
 
-// 2. GET USER-SPECIFIC HISTORY (With Pagination)
 // 2. GET USER-SPECIFIC HISTORY (With Pagination & Optional Month Filter)
 exports.getUserTokenHistory = async (req, res) => {
     try {
@@ -101,6 +100,7 @@ exports.getUserTokenHistory = async (req, res) => {
         res.status(500).json({ success: false, message: "Error fetching history" });
     }
 };
+
 // 3. ADMIN: GET STATS BY DATE
 exports.getStatsByDate = async (req, res) => {
     try {
@@ -112,12 +112,7 @@ exports.getStatsByDate = async (req, res) => {
         const formatted = { "Breakfast": 0, "Lunch": 0, "Snacks": 0, "Dinner": 0 };
         stats.forEach(item => { formatted[item._id] = item.count; });
         res.status(200).json(formatted);
-    } catch (e) { res.status(500).json({ message: 'Error' }); }
-};
-
-exports.getUserTokenHistory = async (req, res) => {
-    try {
-        const history = await Token.find({ userId: req.user.id }).sort({ generatedAt: -1 }).limit(15);
-        res.status(200).json({ success: true, history });
-    } catch (e) { res.status(500).json({ message: "Error" }); }
+    } catch (e) { 
+        res.status(500).json({ message: 'Error' }); 
+    }
 };
