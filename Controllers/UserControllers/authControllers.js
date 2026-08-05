@@ -116,7 +116,8 @@ const siginuppage2 = async (req, res) => {
         const newUser = new User({ name, email, password, enrollmentNo, course, year, phonenumber, hostelblock, room, gender });
         await newUser.save();
 
-        const token = jwt.sign({ id: newUser._id }, process.env.JWT_SECRET, { expiresIn: "24h" });
+        // 🟢 Updated token expiration from "24h" to "365d"
+        const token = jwt.sign({ id: newUser._id }, process.env.JWT_SECRET, { expiresIn: "365d" });
         res.status(201).json({ message: "Registration successful!", token, user: newUser });
     } catch (error) {
         console.error("Signup Step 2 error:", error);
@@ -134,7 +135,8 @@ const signinUser = async (req, res) => {
         const isMatch = await bcrypt.compare(password, userExsisting.password);
         if (!isMatch) return res.status(400).json({ message: "Incorrect password" });
         
-        const token = jwt.sign({ id: userExsisting._id }, process.env.JWT_SECRET, { expiresIn: '24h' });
+        // 🟢 Updated token expiration from "24h" to "365d"
+        const token = jwt.sign({ id: userExsisting._id }, process.env.JWT_SECRET, { expiresIn: '365d' });
         res.status(200).json({ token, user: userExsisting.toObject() });
     } catch (e) {
         res.status(500).json({ message: "Server error" });
