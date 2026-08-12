@@ -13,6 +13,7 @@ const tokenRoute = require('./Routes/UserRoutes/token_route');
 const getTokenHistory = require('./Routes/AdimeRoutes/historyRoute');
 const dayScholarRoute = require('./Routes/UserRoutes/dayschorls_routes');
 const dayScholarAdminRoute = require('./Routes/AdimeRoutes/dayScholreshistory'); // 👈 Admin Day Scholar Route
+const menuRoute = require('./Routes/AdimeRoutes/menuRoute');                      // 👈 Added Menu Route from AdimeRoutes
 
 // 1. Initialize Express App FIRST
 const app = express();
@@ -53,6 +54,7 @@ io.on('connection', (socket) => {
 app.use('/api/auth', authrouter);
 app.use('/api/auth', dayScholarRoute);         // User-side day scholar orders & payments
 app.use('/api', userRoute);
+app.use('/api', menuRoute);                     // 👈 Handles /api/menu/active and /api/admin/menu/upload
 app.use('/api/admin', adminRoute);             // General admin routes
 app.use('/api/admin', dayScholarAdminRoute);   // 👈 Admin day scholar orders API (/api/admin/dayscholar-orders)
 app.use('/api/tokens', tokenRoute);
