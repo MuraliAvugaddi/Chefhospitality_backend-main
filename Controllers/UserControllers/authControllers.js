@@ -116,7 +116,6 @@ const siginuppage2 = async (req, res) => {
         const newUser = new User({ name, email, password, enrollmentNo, course, year, phonenumber, hostelblock, room, gender });
         await newUser.save();
 
-        // 🟢 Updated token expiration from "24h" to "365d"
         const token = jwt.sign({ id: newUser._id }, process.env.JWT_SECRET, { expiresIn: "365d" });
         res.status(201).json({ message: "Registration successful!", token, user: newUser });
     } catch (error) {
@@ -135,7 +134,6 @@ const signinUser = async (req, res) => {
         const isMatch = await bcrypt.compare(password, userExsisting.password);
         if (!isMatch) return res.status(400).json({ message: "Incorrect password" });
         
-        // 🟢 Updated token expiration from "24h" to "365d"
         const token = jwt.sign({ id: userExsisting._id }, process.env.JWT_SECRET, { expiresIn: '365d' });
         res.status(200).json({ token, user: userExsisting.toObject() });
     } catch (e) {
@@ -316,6 +314,59 @@ const verifyCashfreePayment = async (req, res) => {
     }
 };
 
+// 8. CASHFREE WEBHOOK ROUTE (Handles background server-to-server notifications)
+const cashfreeWebhook = async (req, res) => {
+    try {
+        const eventData = req.body;
+        
+        // Check if event type is a successful payment
+        if (eventData && eventData.type === "PAYMENT_SUCCESS_WEBHOOK") {
+            const orderData = eventData.data.order;
+            const paymentData = eventData.data.payment;
+
+            const orderId = orderData.order_id;
+            const amountPaid = orderData.order_amount;
+            const transactionId = paymentData.cf_payment_id?.toString() || orderId;
+            
+            // Extract customer ID passed during order creation
+            const userId = orderData.customer_details.customer_id;
+
+            // Check if payment is already recorded to prevent duplicates
+            const existingPayment = await Payment.findOne({ transactionId });
+            if (!existingPayment) {
+                const now = new Date();
+                const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+                const currentMonthString = `${monthNames[now.getMonth()]} ${now.getFullYear()}`;
+
+                await Payment.create({
+                    userId,
+                    amount: amountPaid,
+                    method: 'online',
+                    transactionId: transactionId,
+                    month: currentMonthString,
+                    status: 'Success',
+                    paidAt: now
+                });
+
+                const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+
+                await User.findByIdAndUpdate(
+                    userId, 
+                    { isApproved: true, accessExpiresAt: lastDayOfMonth }
+                );
+
+                console.log(`✅ Webhook processed successfully for order: ${orderId}`);
+            }
+        }
+
+        // Always reply with 200 OK fast so Cashfree knows you received it
+        return res.status(200).json({ success: true });
+    } catch (error) {
+        console.error("❌ Cashfree Webhook Error:", error);
+        return res.status(500).json({ success: false, message: "Webhook processing failed" });
+    }
+};
+
 // ✅ BACKWARDS COMPATIBILITY ALIAS TO PREVENT ROUTE CRASHES
 const handleOnlinePaymentSuccess = verifyCashfreePayment;
 
@@ -329,5 +380,6 @@ module.exports = {
     getPaymentHistory, 
     handleOnlinePaymentSuccess,
     createCashfreeOrder,
-    verifyCashfreePayment 
+    verifyCashfreePayment,
+    cashfreeWebhook 
 };

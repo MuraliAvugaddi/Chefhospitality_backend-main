@@ -24,6 +24,9 @@ router.post("/payment-success", auth, authcontroller.handleOnlinePaymentSuccess)
 router.post("/create-cashfree-order", auth, authcontroller.createCashfreeOrder);
 router.post("/verify-cashfree-payment", auth, authcontroller.verifyCashfreePayment);
 
+// ✅ Cashfree Webhook Route (Public server-to-server listener)
+router.post("/webhook/cashfree", authcontroller.cashfreeWebhook);
+
 // Forgot and Reset Password routes
 router.post("/forgot-password", authcontroller.forgotPassword);
 router.post("/reset-password", authcontroller.resetPassword);
