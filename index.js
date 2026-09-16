@@ -12,8 +12,9 @@ const adminRoute = require('./Routes/AdimeRoutes/adimeRoute');
 const tokenRoute = require('./Routes/UserRoutes/token_route');
 const getTokenHistory = require('./Routes/AdimeRoutes/historyRoute');
 const dayScholarRoute = require('./Routes/UserRoutes/dayschorls_routes');
-const dayScholarAdminRoute = require('./Routes/AdimeRoutes/dayScholreshistory'); // 👈 Admin Day Scholar Route
-const menuRoute = require('./Routes/AdimeRoutes/menuRoute');                      // 👈 Added Menu Route from AdimeRoutes
+const dayScholarAdminRoute = require('./Routes/AdimeRoutes/dayScholreshistory'); 
+const menuRoute = require('./Routes/AdimeRoutes/menuRoute');                    
+const feedbackRoute = require('./Routes/UserRoutes/feedbackRoutes'); 
 
 // 1. Initialize Express App FIRST
 const app = express();
@@ -52,14 +53,17 @@ io.on('connection', (socket) => {
 
 // Routes Mounting
 app.use('/api/auth', authrouter);
-app.use('/api/auth', dayScholarRoute);         // User-side day scholar orders & payments
+app.use('/api/auth', dayScholarRoute);         
 app.use('/api', userRoute);
-app.use('/api', menuRoute);                     // 👈 Handles /api/menu/active and /api/admin/menu/upload
-app.use('/api/admin', adminRoute);             // General admin routes
-app.use('/api/admin', dayScholarAdminRoute);   // 👈 Admin day scholar orders API (/api/admin/dayscholar-orders)
+app.use('/api', menuRoute);                    
+app.use('/api/admin', adminRoute);             
+app.use('/api/admin', dayScholarAdminRoute);   
 app.use('/api/tokens', tokenRoute);
-//app.use('/api/toeknHostory', getTokenHistory);
 app.use('/api/admin', getTokenHistory);
+
+// ✅ Mounted feedbackRoute under both /api (for students) and /api/admin (for admin viewing)
+app.use('/api', feedbackRoute);
+app.use('/api/admin', feedbackRoute); 
 
 // Database Connection
 mongoose.connect(process.env.MONGO_URI)
