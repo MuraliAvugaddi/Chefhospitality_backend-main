@@ -1,64 +1,130 @@
+const mongoose = require('mongoose');
 const ExcelJS = require('exceljs');
 const User = require('../../Models/users');
 const Payment = require('../../Models/paymentModel');
 const MealSkip = require('../../Models/mealSkipModel');
 
+// Helper to safely find user by ID
+const findUserSafely = async (rawId) => {
+    if (!rawId) return null;
+    const cleanId = String(rawId).trim();
+    if (mongoose.Types.ObjectId.isValid(cleanId)) {
+        const found = await User.findById(cleanId);
+        if (found) return found;
+    }
+    return await User.findOne({
+        $or: [{ _id: cleanId }, { id: cleanId }]
+    });
+};
+
 // 1. Fetch all users for the admin dashboard
 const getAllUsers = async (req, res) => {
     try {
-        const users = await User.find({}).select('-password');
-        res.status(200).json(users);
+        const users = await User.find({}).select('-password').sort({ createdAt: -1 }).lean();
+
+        const formattedUsers = users.map((u) => {
+            const stringId = u._id ? u._id.toString() : (u.id ? u.id.toString() : '');
+            return {
+                ...u,
+                _id: stringId,
+                id: stringId,
+                name: u.name || 'Unnamed Student',
+                enrollmentNo: u.enrollmentNo ? String(u.enrollmentNo) : 'N/A',
+                phonenumber: u.phonenumber ? String(u.phonenumber) : '',
+                course: u.course || 'N/A',
+                year: u.year ? String(u.year) : '1',
+                room: u.room ? String(u.room) : 'N/A',
+                gender: u.gender || 'All',
+                fatherPhone: u.fatherPhone ? String(u.fatherPhone) : '',
+                isApproved: Boolean(u.isApproved),
+                accessExpiresAt: u.accessExpiresAt || null,
+            };
+        });
+
+        res.status(200).json(formattedUsers);
     } catch (error) {
+        console.error("Error fetching users:", error);
         res.status(500).json({ message: 'Server error while fetching users.' });
     }
 };
 
-// 2. Approve/Deactivate User with Monthly Expiry & Payment Logging & Real-Time Socket Broadcast
+// 2. Approve/Deactivate User
 const updateUserStatus = async (req, res) => {
     try {
-        const { userId } = req.params;
+        const rawUserId = req.params.userId || req.body.userId;
         const { isApproved } = req.body;
-        const io = req.io; // Grab socket.io instance from request
+        const io = req.io;
+
+        if (!rawUserId || rawUserId === 'undefined' || rawUserId === 'null' || rawUserId === 'N/A') {
+            return res.status(400).json({ message: 'Valid Student User ID is required.' });
+        }
+
+        const cleanUserId = String(rawUserId).trim();
+        const boolApproved = (isApproved === true || isApproved === 'true' || isApproved === 1);
 
         const now = new Date();
         const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
 
-        const updatedUser = await User.findByIdAndUpdate(
-            userId, 
-            { isApproved, accessExpiresAt: isApproved ? lastDayOfMonth : null }, 
-            { new: true }
+        const filter = mongoose.Types.ObjectId.isValid(cleanUserId)
+            ? { _id: new mongoose.Types.ObjectId(cleanUserId) }
+            : { $or: [{ _id: cleanUserId }, { id: cleanUserId }] };
+
+        const updatedUser = await User.findOneAndUpdate(
+            filter,
+            {
+                $set: {
+                    isApproved: boolApproved,
+                    accessExpiresAt: boolApproved ? lastDayOfMonth : null
+                }
+            },
+            { new: true, runValidators: false }
         ).select('-password');
 
-        // 🚀 BROADCAST REAL-TIME UPDATE TO STUDENT APP
+        if (!updatedUser) {
+            return res.status(404).json({ message: 'Student account not found in database.' });
+        }
+
+        const idStr = updatedUser._id.toString();
+
         if (io) {
             io.emit('statusUpdated', {
-                userId: updatedUser._id.toString(),
+                userId: idStr,
                 isApproved: updatedUser.isApproved,
                 accessExpiresAt: updatedUser.accessExpiresAt
             });
         }
 
-        res.status(200).json({ success: true, user: updatedUser });
+        res.status(200).json({
+            success: true,
+            user: {
+                ...updatedUser.toObject(),
+                _id: idStr,
+                id: idStr
+            }
+        });
     } catch (error) {
         console.error("Status update error:", error);
-        res.status(500).json({ message: 'Error updating user status' });
+        res.status(500).json({ message: 'Error updating user status', error: error.message });
     }
 };
 
-// 3. Fetch Global Monthly Payment History & Check Backlog History
+// 3. Fetch Global Monthly Payment History
 const getAllPayments = async (req, res) => {
     try {
         let { month, gender, date, userId } = req.query;
 
         if (userId) {
-            const userPayments = await Payment.find({ userId }).lean();
-            return res.status(200).json({ success: true, payments: userPayments });
-        }
+            const cleanUid = String(userId).trim();
+            const userFilters = [{ userId: cleanUid }];
+            if (mongoose.Types.ObjectId.isValid(cleanUid)) {
+                userFilters.push({ userId: new mongoose.Types.ObjectId(cleanUid) });
+            }
 
-        if ((!month || month === 'All') && !date) {
-            const now = new Date();
-            const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-            month = `${monthNames[now.getMonth()]} ${now.getFullYear()}`;
+            const userPayments = await Payment.find({ $or: userFilters })
+                .sort({ updatedAt: -1, paidAt: -1 })
+                .lean();
+
+            return res.status(200).json({ success: true, payments: userPayments });
         }
 
         let query = {};
@@ -68,13 +134,14 @@ const getAllPayments = async (req, res) => {
             const endDate = new Date(date);
             endDate.setHours(23, 59, 59, 999);
             query.paidAt = { $gte: startDate,$lte: endDate };
-        } else if (month && month !== 'All Year') {
-            query.month = month;
+        } else if (month && month !== 'All Year' && month !== 'All') {
+            query.month = { $regex: new RegExp(`^${month.trim()}$`, 'i') };
         }
 
         let payments = await Payment.find(query)
-            .populate('userId', 'name enrollmentNo gender year room phonenumber course')
-            .sort({ paidAt: -1 });
+            .populate('userId', 'name enrollmentNo gender year room phonenumber fatherPhone course')
+            .sort({ paidAt: -1 })
+            .lean();
 
         if (gender && gender !== 'All') {
             payments = payments.filter(p => p.userId && p.userId.gender === gender);
@@ -82,23 +149,8 @@ const getAllPayments = async (req, res) => {
 
         res.status(200).json(payments);
     } catch (error) {
+        console.error("Sync payment error:", error);
         res.status(500).json({ message: "Failed to sync payment records" });
-    }
-};
-
-const getDayScholarRevenue = async (req, res) => {
-    try {
-        const { month, mealType } = req.query;
-        let query = { month };
-        if (mealType && mealType !== 'All') query.mealType = mealType;
-
-        const orders = await DayScholarOrder.find(query)
-            .populate('userId', 'name enrollmentNo year room phonenumber course')
-            .sort({ orderedAt: -1 });
-
-        res.status(200).json(orders);
-    } catch (e) {
-        res.status(500).json({ message: "Error fetching records" });
     }
 };
 
@@ -118,7 +170,7 @@ const deactivateAllUsers = async (req, res) => {
 // 5. Fetch Meal Skipping Report
 const getAdminSkipReport = async (req, res) => {
     try {
-        const { date, mealType } = req.query; 
+        const { date, mealType } = req.query;
         let query = { date: date };
 
         if (mealType && mealType !== 'All') {
@@ -126,7 +178,7 @@ const getAdminSkipReport = async (req, res) => {
         }
 
         const report = await MealSkip.find(query)
-            .populate('userId', 'name phonenumber gender room enrollmentNo course') 
+            .populate('userId', 'name phonenumber fatherPhone gender room enrollmentNo course')
             .sort({ mealType: 1 });
 
         const stats = {
@@ -149,32 +201,84 @@ const getAdminSkipReport = async (req, res) => {
     }
 };
 
-// 6. Manually Record Offline/Cash Payment & Real-Time Socket Broadcast
+// 6. Manually Record or Update Offline/Cash Payment & UTRs
 const recordManualPayment = async (req, res) => {
     try {
-        const { userId, amount, month, transactionId, paymentDate } = req.body;
-        const io = req.io; // Grab socket.io instance from request
+        const { userId, amount, month, paymentsData, transactionId, paymentDate, fatherPhone } = req.body;
+        const io = req.io;
 
-        const user = await User.findById(userId);
-        if (!user) return res.status(404).json({ message: "Student not found." });
+        if (!userId) {
+            return res.status(400).json({ message: "Student ID is required." });
+        }
+
+        const user = await findUserSafely(userId);
+        if (!user) {
+            return res.status(404).json({ message: "Student account not found in database." });
+        }
+
+        if (fatherPhone && String(fatherPhone).trim() !== '') {
+            user.fatherPhone = String(fatherPhone).trim();
+        }
+
+        const parsedPaymentDate = paymentDate ? new Date(paymentDate) : new Date();
+        const parsedAmount = Number(amount);
+        const finalAmount = (!isNaN(parsedAmount) && parsedAmount > 0) ? parsedAmount : 4000;
+
+        let recordsToProcess = [];
+        if (paymentsData && Array.isArray(paymentsData) && paymentsData.length > 0) {
+            recordsToProcess = paymentsData;
+        } else {
+            recordsToProcess = [{
+                month: month || "September 2026",
+                transactionId: transactionId || `CASH_${Date.now()}`
+            }];
+        }
+
+        for (const item of recordsToProcess) {
+            const targetMonth = String(item.month || '').trim();
+            if (!targetMonth) continue;
+
+            const txnId = item.transactionId ? String(item.transactionId).trim() : `CASH_${Date.now()}`;
+            const monthPrefix = targetMonth.split(' ')[0];
+
+            const userMatchFilter = {
+                $or: [
+                    { userId: user._id },
+                    { userId: user._id.toString() }
+                ],
+                month: { $regex: new RegExp(monthPrefix, 'i') }
+            };
+
+            await Payment.findOneAndUpdate(
+                userMatchFilter,
+                {
+                    $set: {
+                        userId: user._id,
+                        amount: finalAmount,
+                        method: 'offline',
+                        transactionId: txnId,
+                        month: targetMonth,
+                        status: 'Success',
+                        paidAt: parsedPaymentDate,
+                        updatedAt: new Date()
+                    }
+                },
+                { upsert: true, new: true, setDefaultsOnInsert: true }
+            );
+
+            const allMatches = await Payment.find(userMatchFilter).sort({ updatedAt: -1 });
+            if (allMatches.length > 1) {
+                const idsToDelete = allMatches.slice(1).map(d => d._id);
+                await Payment.deleteMany({ _id: { $in: idsToDelete } });
+            }
+        }
 
         const now = new Date();
-        const payment = await Payment.create({
-            userId,
-            amount: amount || 4000,
-            method: 'offline',
-            transactionId: transactionId || `CASH_${Date.now()}`,
-            month: month || "September 2026",
-            status: 'Success',
-            paidAt: paymentDate ? new Date(paymentDate) : now
-        });
-
         const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
         user.isApproved = true;
         user.accessExpiresAt = lastDayOfMonth;
         await user.save();
 
-        // 🚀 BROADCAST REAL-TIME UPDATE TO STUDENT APP
         if (io) {
             io.emit('statusUpdated', {
                 userId: user._id.toString(),
@@ -183,100 +287,132 @@ const recordManualPayment = async (req, res) => {
             });
         }
 
-        res.status(200).json({ success: true, message: "Offline payment recorded & access granted.", payment });
+        res.status(200).json({
+            success: true,
+            message: "Payment records successfully saved/updated & access granted."
+        });
     } catch (error) {
-        console.error("Manual payment error:", error);
-        res.status(500).json({ message: "Server error recording payment." });
+        console.error("Manual payment update error:", error);
+        res.status(500).json({ message: "Server error recording payment.", error: error.message });
     }
 };
 
-// 7. Export Filtered Student Payment Status to Excel (Includes Paid & Unpaid Students, A-Z Sorted)
+// 7. Export Filtered Student Payment Status to Excel
 const exportStudentReportExcel = async (req, res) => {
     try {
-        const { yearGroup, gender, month } = req.query; 
-        
+        const { yearGroup, gender, month, unpaidOnly } = req.query;
+        const isUnpaidFilterActive = (unpaidOnly === 'true' || unpaidOnly === true || unpaidOnly === '1');
+
         let userQuery = {};
         if (gender && gender !== 'All') {
-            userQuery.gender = gender;
-        }
-        
-        if (yearGroup === 'Junior') {
-            userQuery.year = 1;
-        } else if (yearGroup === 'Senior') {
-            userQuery.year = { $gte: 2 };
+            userQuery.gender = { $regex: new RegExp(`^${gender.trim()}$`, 'i') };
         }
 
-        // Fetch all matching users sorted alphabetically from A to Z
+        if (yearGroup === 'Junior') {
+            userQuery.$or = [{ year: '1' }, { year: 1 }];
+        } else if (yearGroup === 'Senior') {
+            userQuery.$or = [
+                { year: { $ne: '1' } },                 { year: {$ne: 1 } }
+            ];
+        }
+
         const users = await User.find(userQuery).select('-password').sort({ name: 1 }).lean();
         const workbook = new ExcelJS.Workbook();
-        const sheet = workbook.addWorksheet('Student Mess Report');
+        const sheet = workbook.addWorksheet(isUnpaidFilterActive ? 'Unpaid Students' : 'Student Mess Report');
 
-        const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+        const monthNames = [
+            "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December"
+        ];
+
+        // Fetch all verified successful payments
+        const allPayments = await Payment.find({ status: 'Success', amount: { $gt: 0 } }).lean();
+        const userPaymentsMap = {};
+        for (const p of allPayments) {
+            if (p.userId) {
+                const uid = p.userId.toString();
+                if (!userPaymentsMap[uid]) userPaymentsMap[uid] = [];
+                userPaymentsMap[uid].push(p);
+            }
+        }
 
         if (month === 'All Year') {
-            // Yearly Printout Layout
             sheet.columns = [
                 { header: 'S.No', key: 'sno', width: 8 },
                 { header: 'Student Name', key: 'name', width: 25 },
+                { header: 'Gender', key: 'gender', width: 12 },
+                { header: 'Year', key: 'year', width: 10 },
+                { header: 'Room', key: 'room', width: 12 },
                 { header: 'Course', key: 'course', width: 15 },
                 { header: 'Phone Number', key: 'phonenumber', width: 16 },
-                { header: 'Aug Payment', key: 'augPay', width: 15 },
-                { header: 'Sep Payment', key: 'sepPay', width: 15 },
-                { header: 'Total Paid Months', key: 'totalPaid', width: 18 },
+                { header: 'Father Phone', key: 'fatherPhone', width: 16 },
+                { header: 'Aug Payment', key: 'augPay', width: 20 },
+                { header: 'Sep Payment', key: 'sepPay', width: 20 },
+                { header: 'Status', key: 'status', width: 15 },
             ];
 
-            const payments = await Payment.find({}).lean();
-            const userPaymentsMap = {};
-            payments.forEach(p => {
-                if (p.userId) {
-                    const uid = p.userId.toString();
-                    if (!userPaymentsMap[uid]) userPaymentsMap[uid] = [];
-                    userPaymentsMap[uid].push(p);
+            let rowCount = 0;
+            users.forEach((u) => {
+                const uidStr = u._id ? u._id.toString() : '';
+                const userPays = userPaymentsMap[uidStr] || [];
+                const augPayRecord = userPays.find(p => p.month?.toLowerCase().includes('august'));
+                const sepPayRecord = userPays.find(p => p.month?.toLowerCase().includes('september'));
+
+                const isPaidAny = (augPayRecord || sepPayRecord);
+                const isPaidAll = (augPayRecord && sepPayRecord);
+
+                if (isUnpaidFilterActive && isPaidAll) {
+                    return;
                 }
-            });
 
-            users.forEach((u, index) => {
-                const userPays = userPaymentsMap[u._id.toString()] || [];
-                const augPayRecord = userPays.find(p => p.month?.includes('August'));
-                const sepPayRecord = userPays.find(p => p.month?.includes('September'));
-
+                rowCount++;
                 sheet.addRow({
-                    sno: index + 1,
+                    sno: rowCount,
                     name: u.name,
+                    gender: u.gender || 'N/A',
+                    year: u.year || '1',
+                    room: u.room || 'N/A',
                     course: u.course || 'N/A',
                     phonenumber: u.phonenumber || 'N/A',
-                    augPay: augPayRecord ? `${augPayRecord.amount}` : 'UNPAID',
-                    sepPay: sepPayRecord ? `${sepPayRecord.amount}` : 'UNPAID',
-                    totalPaid: `${userPays.length} Months`,
+                    fatherPhone: (u.fatherPhone && u.fatherPhone.trim() !== '') ? u.fatherPhone : 'N/A',
+                    augPay: augPayRecord ? `₹${augPayRecord.amount} [${augPayRecord.transactionId || 'Cash'}]` : 'UNPAID',
+                    sepPay: sepPayRecord ? `₹${sepPayRecord.amount} [${sepPayRecord.transactionId || 'Cash'}]` : 'UNPAID',
+                    status: !isPaidAny ? 'UNPAID ALL' : (!sepPayRecord ? 'UNPAID SEP' : 'UNPAID AUG'),
                 });
             });
 
             res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-            res.setHeader('Content-Disposition', `attachment; filename=Chef_Yearly_Mess_Report_${yearGroup || 'All'}.xlsx`);
+            res.setHeader('Content-Disposition', `attachment; filename=Chef_${isUnpaidFilterActive ? 'UNPAID_' : ''}Yearly_Report_${yearGroup || 'All'}.xlsx`);
         } else {
-            // Monthly Printout Layout
             const targetMonth = month || 'September 2026';
-            const payments = await Payment.find({ month: targetMonth }).lean();
-            const paymentMap = {};
-            payments.forEach(p => {
-                if (p.userId) {
-                    paymentMap[p.userId.toString()] = p;
-                }
-            });
+            const targetMonthPrefix = targetMonth.split(' ')[0].toLowerCase(); // 'august' or 'september'
 
             sheet.columns = [
                 { header: 'S.No', key: 'sno', width: 8 },
                 { header: 'Student Name', key: 'name', width: 25 },
+                { header: 'Gender', key: 'gender', width: 12 },
+                { header: 'Year', key: 'year', width: 10 },
+                { header: 'Room', key: 'room', width: 12 },
                 { header: 'Course', key: 'course', width: 15 },
                 { header: 'Phone Number', key: 'phonenumber', width: 16 },
-                { header: 'Sep Payment', key: 'sepPayment', width: 18 },
+                { header: 'Father Phone', key: 'fatherPhone', width: 16 },
+                { header: `${targetMonth} Status`, key: 'monthStatus', width: 18 },
+                { header: 'Amount', key: 'amount', width: 14 },
                 { header: 'UTR / Txn ID', key: 'txnId', width: 25 },
                 { header: 'Payment Date', key: 'paidAt', width: 18 },
             ];
 
-            users.forEach((u, index) => {
-                const pay = paymentMap[u._id.toString()];
-                
+            let rowCount = 0;
+            users.forEach((u) => {
+                const uidStr = u._id ? u._id.toString() : '';
+                const userPays = userPaymentsMap[uidStr] || [];
+                const pay = userPays.find(p => p.month?.toLowerCase().includes(targetMonthPrefix));
+                const isPaid = (pay !== undefined && pay !== null);
+
+                if (isUnpaidFilterActive && isPaid) {
+                    return;
+                }
+
                 let formattedDate = '-';
                 if (pay && pay.paidAt) {
                     const d = new Date(pay.paidAt);
@@ -286,19 +422,25 @@ const exportStudentReportExcel = async (req, res) => {
                     formattedDate = `${day}-${monthStr}-${year}`;
                 }
 
+                rowCount++;
                 sheet.addRow({
-                    sno: index + 1,
+                    sno: rowCount,
                     name: u.name,
+                    gender: u.gender || 'N/A',
+                    year: u.year || '1',
+                    room: u.room || 'N/A',
                     course: u.course || 'N/A',
                     phonenumber: u.phonenumber || 'N/A',
-                    sepPayment: pay ? `${pay.amount}` : 'UNPAID',
-                    txnId: pay ? (pay.transactionId || 'Cash') : '-',
+                    fatherPhone: (u.fatherPhone && u.fatherPhone.trim() !== '') ? u.fatherPhone : 'N/A',
+                    monthStatus: isPaid ? 'PAID' : 'UNPAID',
+                    amount: isPaid ? `₹${pay.amount}` : '0',
+                    txnId: isPaid ? (pay.transactionId || 'Cash') : '-',
                     paidAt: formattedDate,
                 });
             });
 
             res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-            res.setHeader('Content-Disposition', `attachment; filename=Chef_Mess_Report_${yearGroup || 'All'}_${targetMonth}.xlsx`);
+            res.setHeader('Content-Disposition', `attachment; filename=Chef_${isUnpaidFilterActive ? 'UNPAID_' : ''}Mess_Report_${yearGroup || 'All'}_${targetMonth.replace(/\s+/g, '_')}.xlsx`);
         }
 
         await workbook.xlsx.write(res);
@@ -313,7 +455,6 @@ module.exports = {
     getAllUsers,
     updateUserStatus,
     getAllPayments,
-    getDayScholarRevenue,
     deactivateAllUsers,
     getAdminSkipReport,
     recordManualPayment,

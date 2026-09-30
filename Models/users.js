@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
 
 const userSchema = new mongoose.Schema({
     name: {
@@ -20,7 +21,6 @@ const userSchema = new mongoose.Schema({
             message: "Please enter a valid email address."
         }
     },
-    // ✅ CHANGED: Password is no longer strictly required for Google users
     password: {
         type: String,
         required: false
@@ -38,6 +38,10 @@ const userSchema = new mongoose.Schema({
     },
     phonenumber: {
         type: String,
+    },
+    fatherPhone: {
+        type: String,
+        default: '' // ✅ Permanent profile field for father's contact number
     },
     hostelblock: {
         type: String,
@@ -63,7 +67,6 @@ userSchema.pre("save", async function (next) {
     if (!this.password || !this.isModified("password")) {
         return next();
     }
-    const bcrypt = require("bcryptjs");
     this.password = await bcrypt.hash(this.password, 12);
     next();
 });
