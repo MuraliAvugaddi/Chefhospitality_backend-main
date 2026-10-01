@@ -17,7 +17,7 @@ const findUserSafely = async (rawId) => {
     });
 };
 
-// 1. Fetch all users for the admin dashboard
+// 1. Fetch all users for admin dashboard (Optimized with lean)
 const getAllUsers = async (req, res) => {
     try {
         const users = await User.find({}).select('-password').sort({ createdAt: -1 }).lean();
@@ -108,7 +108,7 @@ const updateUserStatus = async (req, res) => {
     }
 };
 
-// 3. Fetch Global Monthly Payment History
+// 3. Fast Global Monthly Payment History (LIGHTWEIGHT & LEAN)
 const getAllPayments = async (req, res) => {
     try {
         let { month, gender, date, userId } = req.query;
@@ -121,6 +121,7 @@ const getAllPayments = async (req, res) => {
             }
 
             const userPayments = await Payment.find({ $or: userFilters })
+                .select('userId amount method transactionId month status paidAt')
                 .sort({ updatedAt: -1, paidAt: -1 })
                 .lean();
 
@@ -138,14 +139,10 @@ const getAllPayments = async (req, res) => {
             query.month = { $regex: new RegExp(`^${month.trim()}$`, 'i') };
         }
 
-        let payments = await Payment.find(query)
-            .populate('userId', 'name enrollmentNo gender year room phonenumber fatherPhone course')
-            .sort({ paidAt: -1 })
+        // Optimized: only select required fields and use lean for instant JSON response
+        const payments = await Payment.find(query)
+            .select('userId amount method transactionId month status paidAt')
             .lean();
-
-        if (gender && gender !== 'All') {
-            payments = payments.filter(p => p.userId && p.userId.gender === gender);
-        }
 
         res.status(200).json(payments);
     } catch (error) {
@@ -179,7 +176,8 @@ const getAdminSkipReport = async (req, res) => {
 
         const report = await MealSkip.find(query)
             .populate('userId', 'name phonenumber fatherPhone gender room enrollmentNo course')
-            .sort({ mealType: 1 });
+            .sort({ mealType: 1 })
+            .lean();
 
         const stats = {
             breakfast: report.filter(item => item.mealType === 'Breakfast').length,
@@ -201,7 +199,7 @@ const getAdminSkipReport = async (req, res) => {
     }
 };
 
-// 6. Manually Record or Update Offline/Cash Payment & UTRs
+// 6. Record Manual Payment
 const recordManualPayment = async (req, res) => {
     try {
         const { userId, amount, month, paymentsData, transactionId, paymentDate, fatherPhone } = req.body;
@@ -229,7 +227,7 @@ const recordManualPayment = async (req, res) => {
             recordsToProcess = paymentsData;
         } else {
             recordsToProcess = [{
-                month: month || "September 2026",
+                month: month || "October 2026",
                 transactionId: transactionId || `CASH_${Date.now()}`
             }];
         }
@@ -325,7 +323,6 @@ const exportStudentReportExcel = async (req, res) => {
             "July", "August", "September", "October", "November", "December"
         ];
 
-        // Fetch all verified successful payments
         const allPayments = await Payment.find({ status: 'Success', amount: { $gt: 0 } }).lean();
         const userPaymentsMap = {};
         for (const p of allPayments) {
@@ -348,6 +345,7 @@ const exportStudentReportExcel = async (req, res) => {
                 { header: 'Father Phone', key: 'fatherPhone', width: 16 },
                 { header: 'Aug Payment', key: 'augPay', width: 20 },
                 { header: 'Sep Payment', key: 'sepPay', width: 20 },
+                { header: 'Oct Payment', key: 'octPay', width: 20 },
                 { header: 'Status', key: 'status', width: 15 },
             ];
 
@@ -357,9 +355,9 @@ const exportStudentReportExcel = async (req, res) => {
                 const userPays = userPaymentsMap[uidStr] || [];
                 const augPayRecord = userPays.find(p => p.month?.toLowerCase().includes('august'));
                 const sepPayRecord = userPays.find(p => p.month?.toLowerCase().includes('september'));
+                const octPayRecord = userPays.find(p => p.month?.toLowerCase().includes('october'));
 
-                const isPaidAny = (augPayRecord || sepPayRecord);
-                const isPaidAll = (augPayRecord && sepPayRecord);
+                const isPaidAll = (augPayRecord && sepPayRecord && octPayRecord);
 
                 if (isUnpaidFilterActive && isPaidAll) {
                     return;
@@ -377,15 +375,16 @@ const exportStudentReportExcel = async (req, res) => {
                     fatherPhone: (u.fatherPhone && u.fatherPhone.trim() !== '') ? u.fatherPhone : 'N/A',
                     augPay: augPayRecord ? `₹${augPayRecord.amount} [${augPayRecord.transactionId || 'Cash'}]` : 'UNPAID',
                     sepPay: sepPayRecord ? `₹${sepPayRecord.amount} [${sepPayRecord.transactionId || 'Cash'}]` : 'UNPAID',
-                    status: !isPaidAny ? 'UNPAID ALL' : (!sepPayRecord ? 'UNPAID SEP' : 'UNPAID AUG'),
+                    octPay: octPayRecord ? `₹${octPayRecord.amount} [${octPayRecord.transactionId || 'Cash'}]` : 'UNPAID',
+                    status: !octPayRecord ? 'UNPAID OCT' : 'PAID OCT',
                 });
             });
 
             res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
             res.setHeader('Content-Disposition', `attachment; filename=Chef_${isUnpaidFilterActive ? 'UNPAID_' : ''}Yearly_Report_${yearGroup || 'All'}.xlsx`);
         } else {
-            const targetMonth = month || 'September 2026';
-            const targetMonthPrefix = targetMonth.split(' ')[0].toLowerCase(); // 'august' or 'september'
+            const targetMonth = month || 'October 2026';
+            const targetMonthPrefix = targetMonth.split(' ')[0].toLowerCase();
 
             sheet.columns = [
                 { header: 'S.No', key: 'sno', width: 8 },
