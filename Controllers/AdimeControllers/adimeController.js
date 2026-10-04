@@ -17,13 +17,21 @@ const findUserSafely = async (rawId) => {
     });
 };
 
-// 1. Fetch all users for admin dashboard (Optimized with lean)
+// 1. Fetch all users for admin dashboard (Auto-evaluates expired access)
 const getAllUsers = async (req, res) => {
     try {
         const users = await User.find({}).select('-password').sort({ createdAt: -1 }).lean();
+        const now = new Date();
 
         const formattedUsers = users.map((u) => {
             const stringId = u._id ? u._id.toString() : (u.id ? u.id.toString() : '');
+
+            // Automatically evaluate if their monthly access has expired
+            let isCurrentlyApproved = Boolean(u.isApproved);
+            if (u.accessExpiresAt && new Date(u.accessExpiresAt) < now) {
+                isCurrentlyApproved = false;
+            }
+
             return {
                 ...u,
                 _id: stringId,
@@ -36,7 +44,7 @@ const getAllUsers = async (req, res) => {
                 room: u.room ? String(u.room) : 'N/A',
                 gender: u.gender || 'All',
                 fatherPhone: u.fatherPhone ? String(u.fatherPhone) : '',
-                isApproved: Boolean(u.isApproved),
+                isApproved: isCurrentlyApproved, // Returns false automatically if past accessExpiresAt
                 accessExpiresAt: u.accessExpiresAt || null,
             };
         });
@@ -108,7 +116,7 @@ const updateUserStatus = async (req, res) => {
     }
 };
 
-// 3. Fast Global Monthly Payment History (LIGHTWEIGHT & LEAN)
+// 3. Fast Global Monthly Payment History
 const getAllPayments = async (req, res) => {
     try {
         let { month, gender, date, userId } = req.query;
@@ -139,7 +147,6 @@ const getAllPayments = async (req, res) => {
             query.month = { $regex: new RegExp(`^${month.trim()}$`, 'i') };
         }
 
-        // Optimized: only select required fields and use lean for instant JSON response
         const payments = await Payment.find(query)
             .select('userId amount method transactionId month status paidAt')
             .lean();
@@ -199,7 +206,7 @@ const getAdminSkipReport = async (req, res) => {
     }
 };
 
-// 6. Record Manual Payment
+// 6. Record Manual Payment (WITH STRICT DUPLICATE UTR PROTECTION)
 const recordManualPayment = async (req, res) => {
     try {
         const { userId, amount, month, paymentsData, transactionId, paymentDate, fatherPhone } = req.body;
@@ -232,6 +239,42 @@ const recordManualPayment = async (req, res) => {
             }];
         }
 
+        // =========================================================================
+        // 🔒 DUPLICATE UTR VALIDATION (CHECKS ALL STUDENTS & MONTHS)
+        // =========================================================================
+        for (const item of recordsToProcess) {
+            const rawTxn = item.transactionId ? String(item.transactionId).trim() : '';
+            const isCashOrDummy = rawTxn.toUpperCase().startsWith('CASH') || rawTxn.toUpperCase() === 'N/A';
+
+            if (rawTxn && !isCashOrDummy) {
+                // Find if this UTR has already been registered in the system
+                const existingTxn = await Payment.findOne({
+                    transactionId: { $regex: new RegExp(`^${rawTxn}$`, 'i') },
+                    status: 'Success'
+                }).populate('userId', 'name phonenumber enrollmentNo').lean();
+
+                if (existingTxn) {
+                    const existingUid = existingTxn.userId ? String(existingTxn.userId._id || existingTxn.userId.id || existingTxn.userId) : '';
+                    const currentUid = String(user._id);
+
+                    const isDifferentStudent = existingUid && existingUid !== currentUid;
+                    const isDifferentMonth = existingTxn.month && !existingTxn.month.toLowerCase().includes((item.month || '').toLowerCase().split(' ')[0]);
+
+                    if (isDifferentStudent || isDifferentMonth) {
+                        const previousStudentName = existingTxn.userId?.name || "Another Student";
+                        const previousMonth = existingTxn.month || "a past month";
+                        return res.status(400).json({
+                            success: false,
+                            message: `Duplicate UTR detected! Transaction ID (${rawTxn}) was already recorded for ${previousStudentName} (${previousMonth}). Reusing screenshots is strictly prohibited.`
+                        });
+                    }
+                }
+            }
+        }
+
+        // =========================================================================
+        // SAVE OR UPDATE PAYMENT
+        // =========================================================================
         for (const item of recordsToProcess) {
             const targetMonth = String(item.month || '').trim();
             if (!targetMonth) continue;
