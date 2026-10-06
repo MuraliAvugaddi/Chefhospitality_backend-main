@@ -4,7 +4,7 @@ const User = require('../../Models/users');
 const Payment = require('../../Models/paymentModel');
 const MealSkip = require('../../Models/mealSkipModel');
 
-// Helper to safely find user by ID
+// Helper to safely find user by ID, enrollmentNo, or phone
 const findUserSafely = async (rawId) => {
     if (!rawId) return null;
     const cleanId = String(rawId).trim();
@@ -13,8 +13,26 @@ const findUserSafely = async (rawId) => {
         if (found) return found;
     }
     return await User.findOne({
-        $or: [{ _id: cleanId }, { id: cleanId }]
+        $or: [
+            { _id: cleanId },
+            { id: cleanId },
+            { enrollmentNo: cleanId },
+            { phonenumber: cleanId }
+        ]
     });
+};
+
+// Helper: Checks if the input is a genuine numeric bank/UPI UTR (ignores words like 'unpaid', 'cash', etc.)
+const isRealNumericUtr = (val) => {
+    if (!val) return false;
+    const clean = String(val).trim().toLowerCase();
+    const ignoredWords = ['unpaid', 'pending', 'due', 'none', 'null', 'n/a', 'na'];
+    if (ignoredWords.includes(clean) || clean.startsWith('cash')) {
+        return false;
+    }
+    // Must contain at least 6 digits to be recognized as a genuine transaction reference
+    const digitsOnly = clean.replace(/\D/g, '');
+    return digitsOnly.length >= 6;
 };
 
 // 1. Fetch all users for admin dashboard (Auto-evaluates expired access)
@@ -26,7 +44,6 @@ const getAllUsers = async (req, res) => {
         const formattedUsers = users.map((u) => {
             const stringId = u._id ? u._id.toString() : (u.id ? u.id.toString() : '');
 
-            // Automatically evaluate if their monthly access has expired
             let isCurrentlyApproved = Boolean(u.isApproved);
             if (u.accessExpiresAt && new Date(u.accessExpiresAt) < now) {
                 isCurrentlyApproved = false;
@@ -44,7 +61,7 @@ const getAllUsers = async (req, res) => {
                 room: u.room ? String(u.room) : 'N/A',
                 gender: u.gender || 'All',
                 fatherPhone: u.fatherPhone ? String(u.fatherPhone) : '',
-                isApproved: isCurrentlyApproved, // Returns false automatically if past accessExpiresAt
+                isApproved: isCurrentlyApproved,
                 accessExpiresAt: u.accessExpiresAt || null,
             };
         });
@@ -116,7 +133,7 @@ const updateUserStatus = async (req, res) => {
     }
 };
 
-// 3. Fast Global Monthly Payment History
+// 3. Fast Global Monthly Payment History (POPULATES STUDENT DETAILS)
 const getAllPayments = async (req, res) => {
     try {
         let { month, gender, date, userId } = req.query;
@@ -129,7 +146,10 @@ const getAllPayments = async (req, res) => {
             }
 
             const userPayments = await Payment.find({ $or: userFilters })
-                .select('userId amount method transactionId month status paidAt')
+                .populate({
+                    path: 'userId',
+                    select: 'name enrollmentNo course year room hostelblock phonenumber gender'
+                })
                 .sort({ updatedAt: -1, paidAt: -1 })
                 .lean();
 
@@ -142,14 +162,26 @@ const getAllPayments = async (req, res) => {
             startDate.setHours(0, 0, 0, 0);
             const endDate = new Date(date);
             endDate.setHours(23, 59, 59, 999);
-            query.paidAt = { $gte: startDate,$lte: endDate };
+            query.paidAt = { $gte: startDate, $lte: endDate };
         } else if (month && month !== 'All Year' && month !== 'All') {
             query.month = { $regex: new RegExp(`^${month.trim()}$`, 'i') };
         }
 
-        const payments = await Payment.find(query)
-            .select('userId amount method transactionId month status paidAt')
+        // 🔑 POPULATE userId so Flutter receives the full student profile
+        let payments = await Payment.find(query)
+            .populate({
+                path: 'userId',
+                select: 'name enrollmentNo course year room hostelblock phonenumber gender'
+            })
+            .sort({ paidAt: -1 })
             .lean();
+
+        // Filter by student gender if requested
+        if (gender && gender !== 'All') {
+            payments = payments.filter(
+                p => p.userId && p.userId.gender && p.userId.gender.toLowerCase() === gender.toLowerCase()
+            );
+        }
 
         res.status(200).json(payments);
     } catch (error) {
@@ -206,17 +238,18 @@ const getAdminSkipReport = async (req, res) => {
     }
 };
 
-// 6. Record Manual Payment (WITH STRICT DUPLICATE UTR PROTECTION)
+// 6. Record Manual Payment (WITH STRICT NUMERIC DUPLICATE UTR PROTECTION)
 const recordManualPayment = async (req, res) => {
     try {
-        const { userId, amount, month, paymentsData, transactionId, paymentDate, fatherPhone } = req.body;
+        const { userId, studentId, amount, month, paymentsData, transactionId, paymentDate, date, fatherPhone } = req.body;
         const io = req.io;
 
-        if (!userId) {
+        const targetId = userId || studentId;
+        if (!targetId) {
             return res.status(400).json({ message: "Student ID is required." });
         }
 
-        const user = await findUserSafely(userId);
+        const user = await findUserSafely(targetId);
         if (!user) {
             return res.status(404).json({ message: "Student account not found in database." });
         }
@@ -225,7 +258,8 @@ const recordManualPayment = async (req, res) => {
             user.fatherPhone = String(fatherPhone).trim();
         }
 
-        const parsedPaymentDate = paymentDate ? new Date(paymentDate) : new Date();
+        const effectiveDate = paymentDate || date;
+        const parsedPaymentDate = effectiveDate ? new Date(effectiveDate) : new Date();
         const parsedAmount = Number(amount);
         const finalAmount = (!isNaN(parsedAmount) && parsedAmount > 0) ? parsedAmount : 4000;
 
@@ -240,20 +274,18 @@ const recordManualPayment = async (req, res) => {
         }
 
         // =========================================================================
-        // 🔒 DUPLICATE UTR VALIDATION (CHECKS ALL STUDENTS & MONTHS)
+        // 🔒 DUPLICATE UTR VALIDATION (CHECKS REAL NUMERIC UTRs ONLY)
         // =========================================================================
         for (const item of recordsToProcess) {
             const rawTxn = item.transactionId ? String(item.transactionId).trim() : '';
-            const isCashOrDummy = rawTxn.toUpperCase().startsWith('CASH') || rawTxn.toUpperCase() === 'N/A';
 
-            if (rawTxn && !isCashOrDummy) {
-                // Find if this UTR has already been registered in the system
+            if (isRealNumericUtr(rawTxn)) {
                 const existingTxn = await Payment.findOne({
                     transactionId: { $regex: new RegExp(`^${rawTxn}$`, 'i') },
                     status: 'Success'
                 }).populate('userId', 'name phonenumber enrollmentNo').lean();
 
-                if (existingTxn) {
+                if (existingTxn && isRealNumericUtr(existingTxn.transactionId)) {
                     const existingUid = existingTxn.userId ? String(existingTxn.userId._id || existingTxn.userId.id || existingTxn.userId) : '';
                     const currentUid = String(user._id);
 
@@ -265,7 +297,7 @@ const recordManualPayment = async (req, res) => {
                         const previousMonth = existingTxn.month || "a past month";
                         return res.status(400).json({
                             success: false,
-                            message: `Duplicate UTR detected! Transaction ID (${rawTxn}) was already recorded for ${previousStudentName} (${previousMonth}). Reusing screenshots is strictly prohibited.`
+                            message: `Duplicate UTR detected! Transaction ID (${rawTxn}) was already recorded for ${previousStudentName} (${previousMonth}). Reusing bank screenshots is strictly prohibited.`
                         });
                     }
                 }
@@ -338,7 +370,91 @@ const recordManualPayment = async (req, res) => {
     }
 };
 
-// 7. Export Filtered Student Payment Status to Excel
+// 7. Reset / Delete an Accidental Month Payment
+const deleteMonthPayment = async (req, res) => {
+    try {
+        const { userId, month } = req.body;
+        if (!userId || !month) {
+            return res.status(400).json({ message: "Student ID and month are required." });
+        }
+
+        const user = await findUserSafely(userId);
+        if (!user) {
+            return res.status(404).json({ message: "Student not found in database." });
+        }
+
+        const monthPrefix = String(month).trim().split(' ')[0];
+
+        await Payment.deleteMany({
+            $or: [
+                { userId: user._id },
+                { userId: user._id.toString() }
+            ],
+            month: { $regex: new RegExp(`^${monthPrefix}`, 'i') }
+        });
+
+        return res.status(200).json({
+            success: true,
+            message: `Payment record for ${month} successfully deleted and marked unpaid.`
+        });
+    } catch (error) {
+        console.error("Delete month payment error:", error);
+        return res.status(500).json({ message: "Server error resetting month payment." });
+    }
+};
+
+// 8. Delete Student Completely (Admin Panel)
+const deleteUser = async (req, res) => {
+    try {
+        const rawUserId = req.params.userId || req.body.userId;
+        const io = req.io;
+
+        if (!rawUserId) {
+            return res.status(400).json({ message: "Student ID is required." });
+        }
+
+        const cleanUserId = String(rawUserId).trim();
+        const filter = mongoose.Types.ObjectId.isValid(cleanUserId)
+            ? { _id: new mongoose.Types.ObjectId(cleanUserId) }
+            : { $or: [{ _id: cleanUserId }, { id: cleanUserId }] };
+
+        const deletedUser = await User.findOneAndDelete(filter);
+        if (!deletedUser) {
+            return res.status(404).json({ message: "Student account not found." });
+        }
+
+        const studentId = deletedUser._id;
+
+        // Clean up student's payments and meal skips
+        await Payment.deleteMany({
+            $or: [
+                { userId: studentId },
+                { userId: studentId.toString() }
+            ]
+        });
+
+        await MealSkip.deleteMany({
+            $or: [
+                { userId: studentId },
+                { userId: studentId.toString() }
+            ]
+        });
+
+        if (io) {
+            io.emit('studentDeleted', { userId: studentId.toString() });
+        }
+
+        res.status(200).json({
+            success: true,
+            message: `Student ${deletedUser.name} and related records have been deleted.`
+        });
+    } catch (error) {
+        console.error("Delete student error:", error);
+        res.status(500).json({ message: "Server error deleting student.", error: error.message });
+    }
+};
+
+// 9. Export Filtered Student Payment Status to Excel
 const exportStudentReportExcel = async (req, res) => {
     try {
         const { yearGroup, gender, month, unpaidOnly } = req.query;
@@ -423,8 +539,15 @@ const exportStudentReportExcel = async (req, res) => {
                 });
             });
 
+            const fileName = `Chef_${isUnpaidFilterActive ? 'UNPAID_' : ''}Yearly_Report_${yearGroup || 'All'}.xlsx`;
+
             res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-            res.setHeader('Content-Disposition', `attachment; filename=Chef_${isUnpaidFilterActive ? 'UNPAID_' : ''}Yearly_Report_${yearGroup || 'All'}.xlsx`);
+            res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+            // ✅ Expose headers so Flutter Web can access file download streams
+            res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+
+            await workbook.xlsx.write(res);
+            return res.end();
         } else {
             const targetMonth = month || 'October 2026';
             const targetMonthPrefix = targetMonth.split(' ')[0].toLowerCase();
@@ -481,12 +604,16 @@ const exportStudentReportExcel = async (req, res) => {
                 });
             });
 
-            res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-            res.setHeader('Content-Disposition', `attachment; filename=Chef_${isUnpaidFilterActive ? 'UNPAID_' : ''}Mess_Report_${yearGroup || 'All'}_${targetMonth.replace(/\s+/g, '_')}.xlsx`);
-        }
+            const fileName = `Chef_${isUnpaidFilterActive ? 'UNPAID_' : ''}Mess_Report_${yearGroup || 'All'}_${targetMonth.replace(/\s+/g, '_')}.xlsx`;
 
-        await workbook.xlsx.write(res);
-        res.end();
+            res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+            res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+            // ✅ Expose headers so Flutter Web can access file download streams
+            res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+
+            await workbook.xlsx.write(res);
+            return res.end();
+        }
     } catch (error) {
         console.error("Excel export error:", error);
         res.status(500).json({ message: "Failed to generate Excel report" });
@@ -500,5 +627,7 @@ module.exports = {
     deactivateAllUsers,
     getAdminSkipReport,
     recordManualPayment,
+    deleteMonthPayment,
+    deleteUser,
     exportStudentReportExcel,
 };
