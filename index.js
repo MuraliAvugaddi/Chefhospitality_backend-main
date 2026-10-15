@@ -12,14 +12,15 @@ const adminRoute = require('./Routes/AdimeRoutes/adimeRoute');
 const tokenRoute = require('./Routes/UserRoutes/token_route');
 const getTokenHistory = require('./Routes/AdimeRoutes/historyRoute');
 const dayScholarRoute = require('./Routes/UserRoutes/dayschorls_routes');
-const dayScholarAdminRoute = require('./Routes/AdimeRoutes/dayScholreshistory'); 
-const menuRoute = require('./Routes/AdimeRoutes/menuRoute');                    
-const feedbackRoute = require('./Routes/UserRoutes/feedbackRoutes'); 
+const dayScholarAdminRoute = require('./Routes/AdimeRoutes/dayScholreshistory');
+const menuRoute = require('./Routes/AdimeRoutes/menuRoute');
+const feedbackRoute = require('./Routes/UserRoutes/feedbackRoutes');
+const systemNoticeRoute = require('./Routes/AdimeRoutes/systemNoticeRoute'); // ✅ NEW
 
 // 1. Initialize Express App
 const app = express();
 
-// 2. Comprehensive CORS configuration (fixes Flutter Web pre-flight & auth issues)
+// 2. CORS configuration (Flutter Web pre-flight & auth)
 app.use(cors({
     origin: "*",
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -33,15 +34,14 @@ app.use(express.urlencoded({ extended: true }));
 // 3. Create HTTP Server for Socket.io
 const server = http.createServer(app);
 
-// 4. Initialize Socket.io with CORS for the bridge
+// 4. Initialize Socket.io
 const io = new Server(server, {
     cors: {
-        origin: "*", 
+        origin: "*",
         methods: ["GET", "POST"]
     }
 });
 
-// Make 'io' accessible to routes
 app.set('socketio', io);
 app.use((req, res, next) => {
     req.io = io;
@@ -50,13 +50,12 @@ app.use((req, res, next) => {
 
 io.on('connection', (socket) => {
     console.log('⚡ A device connected to the bridge:', socket.id);
-    
     socket.on('disconnect', () => {
         console.log('❌ Device disconnected');
     });
 });
 
-// Health check endpoint (test this in your browser: http://localhost:5002/api/health)
+// Health check
 app.get('/api/health', (req, res) => {
     res.status(200).json({ status: 'ok', message: 'Backend is running smoothly' });
 });
@@ -67,28 +66,31 @@ app.get('/api/health', (req, res) => {
 
 // Authentication & Day Scholar Routes
 app.use('/api/auth', authrouter);
-app.use('/api/auth', dayScholarRoute);         
+app.use('/api/auth', dayScholarRoute);
 
 // Core User Routes
 app.use('/api', userRoute);
 
-// Menu Routes (Exposes /api/menu/active and /api/admin/menu/upload)
-app.use('/api', menuRoute);                    
+// Menu Routes
+app.use('/api', menuRoute);
 
 // Admin Dashboard, Orders & History Routes
-app.use('/api/admin', adminRoute);             
-app.use('/api/admin', dayScholarAdminRoute);   
+app.use('/api/admin', adminRoute);
+app.use('/api/admin', dayScholarAdminRoute);
 app.use('/api/admin', getTokenHistory);
 
 // Meal Token Routes
 app.use('/api/tokens', tokenRoute);
 
-// Feedback Routes (Exposes POST /api/feedback and GET /api/admin/feedback)
+// Feedback Routes
 app.use('/api', feedbackRoute);
-app.use('/api/admin', feedbackRoute); 
+app.use('/api/admin', feedbackRoute);
+
+// ✅ System / Payment Notice -> GET /api/system/notice
+app.use('/api', systemNoticeRoute);
 
 // ============================================================
-// JSON 404 HANDLER (PREVENTS HTML <!DOCTYPE> ERROR RESPONSES)
+// JSON 404 HANDLER
 // ============================================================
 app.use((req, res) => {
     res.status(404).json({
@@ -111,10 +113,8 @@ mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log("✅ MongoDB Connected Successfully"))
     .catch((err) => console.log("❌ MongoDB Connection Error:", err));
 
-// 5. Start Server with 0.0.0.0 binding on Port 5002
 const PORT = process.env.PORT || 5002;
 
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Server is running on http://0.0.0.0:${PORT}`);
-    console.log(`📡 Ready for Flutter Web & Mobile connections on port ${PORT}`);
 });
