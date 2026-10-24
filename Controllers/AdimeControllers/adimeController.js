@@ -3,6 +3,11 @@ const ExcelJS = require('exceljs');
 const User = require('../../Models/users');
 const Payment = require('../../Models/paymentModel');
 const MealSkip = require('../../Models/mealSkipModel');
+const PaymentSubmission = require('../../Models/paymentSubmissionModel');
+const { findUtrOwner, normalizeUtr } = require('../../utils/utr');
+const { refreshAccessFromPayments } = require('../../utils/access');
+const { endOfMonthIST, currentMonthParts, monthKey, monthRange, normalizeLabel } = require('../../utils/months');
+const { getPaymentConfig } = require('../../utils/paymentConfig');
 
 // Helper to safely find user by ID, enrollmentNo, or phone
 const findUserSafely = async (rawId) => {
@@ -87,8 +92,14 @@ const updateUserStatus = async (req, res) => {
         const cleanUserId = String(rawUserId).trim();
         const boolApproved = (isApproved === true || isApproved === 'true' || isApproved === 1);
 
-        const now = new Date();
-        const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+        // End of the current month in IST — but never shorten a prepaid 3/6-month plan
+        let lastDayOfMonth = endOfMonthIST(currentMonthParts());
+        const existingUser = mongoose.Types.ObjectId.isValid(cleanUserId)
+            ? await User.findById(cleanUserId).select('accessExpiresAt').lean()
+            : null;
+        if (existingUser?.accessExpiresAt && new Date(existingUser.accessExpiresAt) > lastDayOfMonth) {
+            lastDayOfMonth = new Date(existingUser.accessExpiresAt);
+        }
 
         const filter = mongoose.Types.ObjectId.isValid(cleanUserId)
             ? { _id: new mongoose.Types.ObjectId(cleanUserId) }
@@ -194,10 +205,18 @@ const getAllPayments = async (req, res) => {
 const deactivateAllUsers = async (req, res) => {
     try {
         const { io } = req;
-        await User.updateMany({}, { $set: { isApproved: false, accessExpiresAt: null } });
+        // Students who prepaid (3/6-month plans) keep their access.
+        const now = new Date();
+        const result = await User.updateMany(
+            { $or: [{ accessExpiresAt: null }, { accessExpiresAt: { $lt: now } }] },
+            { $set: { isApproved: false, accessExpiresAt: null } }
+        );
         if (io) io.emit('statusUpdated', { isApproved: false, accessExpiresAt: null });
 
-        res.status(200).json({ success: true, message: 'All users deactivated for new month.' });
+        res.status(200).json({
+            success: true,
+            message: `${result.modifiedCount ?? 0} students deactivated for the new month. Prepaid students kept their access.`,
+        });
     } catch (error) {
         res.status(500).json({ message: 'Server error deactivating users.' });
     }
@@ -280,6 +299,15 @@ const recordManualPayment = async (req, res) => {
             const rawTxn = item.transactionId ? String(item.transactionId).trim() : '';
 
             if (isRealNumericUtr(rawTxn)) {
+                // Also checks screenshots uploaded by students
+                const owner = await findUtrOwner(normalizeUtr(rawTxn), { excludeUserId: user._id });
+                if (owner && owner.where !== 'own-pending') {
+                    return res.status(400).json({
+                        success: false,
+                        message: `Duplicate UTR detected! Transaction ID (${rawTxn}) was already recorded for ${owner.name} (${owner.month}). Reusing bank screenshots is strictly prohibited.`
+                    });
+                }
+
                 const existingTxn = await Payment.findOne({
                     transactionId: { $regex: new RegExp(`^${rawTxn}$`, 'i') },
                     status: 'Success'
@@ -290,9 +318,8 @@ const recordManualPayment = async (req, res) => {
                     const currentUid = String(user._id);
 
                     const isDifferentStudent = existingUid && existingUid !== currentUid;
-                    const isDifferentMonth = existingTxn.month && !existingTxn.month.toLowerCase().includes((item.month || '').toLowerCase().split(' ')[0]);
-
-                    if (isDifferentStudent || isDifferentMonth) {
+                    // Same student + same UTR is allowed (one payment for a 3 or 6 month plan)
+                    if (isDifferentStudent) {
                         const previousStudentName = existingTxn.userId?.name || "Another Student";
                         const previousMonth = existingTxn.month || "a past month";
                         return res.status(400).json({
@@ -313,13 +340,14 @@ const recordManualPayment = async (req, res) => {
 
             const txnId = item.transactionId ? String(item.transactionId).trim() : `CASH_${Date.now()}`;
             const monthPrefix = targetMonth.split(' ')[0];
+            const monthYear = targetMonth.split(' ')[1] || '';
 
             const userMatchFilter = {
                 $or: [
                     { userId: user._id },
                     { userId: user._id.toString() }
                 ],
-                month: { $regex: new RegExp(monthPrefix, 'i') }
+                month: { $regex: new RegExp(`^${monthPrefix}\\s*${monthYear}`, 'i') }
             };
 
             await Payment.findOneAndUpdate(
@@ -333,6 +361,8 @@ const recordManualPayment = async (req, res) => {
                         month: targetMonth,
                         status: 'Success',
                         paidAt: parsedPaymentDate,
+                        planMonths: recordsToProcess.length,
+                        source: 'manual',
                         updatedAt: new Date()
                     }
                 },
@@ -346,11 +376,13 @@ const recordManualPayment = async (req, res) => {
             }
         }
 
-        const now = new Date();
-        const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
-        user.isApproved = true;
-        user.accessExpiresAt = lastDayOfMonth;
-        await user.save();
+        await user.save(); // saves fatherPhone
+        // Access runs till the end of the LAST paid month (e.g. 3-month plan → 3 months)
+        const refreshed = await refreshAccessFromPayments(user._id);
+        if (refreshed) {
+            user.isApproved = refreshed.isApproved;
+            user.accessExpiresAt = refreshed.accessExpiresAt;
+        }
 
         if (io) {
             io.emit('statusUpdated', {
@@ -383,15 +415,33 @@ const deleteMonthPayment = async (req, res) => {
             return res.status(404).json({ message: "Student not found in database." });
         }
 
-        const monthPrefix = String(month).trim().split(' ')[0];
+        const label = normalizeLabel(month);
+        const monthPrefix = label.split(' ')[0];
+        const monthYear = label.split(' ')[1] || '';
 
         await Payment.deleteMany({
             $or: [
                 { userId: user._id },
                 { userId: user._id.toString() }
             ],
-            month: { $regex: new RegExp(`^${monthPrefix}`, 'i') }
+            month: { $regex: new RegExp(`^${monthPrefix}\\s*${monthYear}`, 'i') }
         });
+
+        // If this month came from an approved screenshot, mark that request as reset
+        await PaymentSubmission.updateMany(
+            { userId: user._id, status: 'approved', months: label },
+            { $set: { status: 'rejected', rejectReason: `Reset by admin (${label})`, reviewedAt: new Date() } }
+        );
+
+        // Recalculate access from the months that are still paid
+        const refreshed = await refreshAccessFromPayments(user._id, { keepLaterExpiry: false });
+        if (req.io && refreshed) {
+            req.io.emit('statusUpdated', {
+                userId: String(refreshed._id),
+                isApproved: refreshed.isApproved,
+                accessExpiresAt: refreshed.accessExpiresAt
+            });
+        }
 
         return res.status(200).json({
             success: true,
@@ -455,6 +505,8 @@ const deleteUser = async (req, res) => {
 };
 
 // 9. Export Filtered Student Payment Status to Excel
+// Months are automatic: from FIRST_FEE_MONTH (.env, default "August 2026")
+// up to the current month (+ any month someone has already prepaid).
 const exportStudentReportExcel = async (req, res) => {
     try {
         const { yearGroup, gender, month, unpaidOnly } = req.query;
@@ -466,11 +518,10 @@ const exportStudentReportExcel = async (req, res) => {
         }
 
         if (yearGroup === 'Junior') {
-            userQuery.$or = [{ year: '1' }, { year: 1 }];
+            userQuery.year = { $in: ['1', 1] };
         } else if (yearGroup === 'Senior') {
-            userQuery.$or = [
-                { year: { $ne: '1' } },                 { year: {$ne: 1 } }
-            ];
+            // ✅ FIX: old query `$or: [{year:{$ne:'1'}}, {year:{$ne:1}}]` matched everyone
+            userQuery.year = { $nin: ['1', 1] };
         }
 
         const users = await User.find(userQuery).select('-password').sort({ name: 1 }).lean();
@@ -482,138 +533,133 @@ const exportStudentReportExcel = async (req, res) => {
             "July", "August", "September", "October", "November", "December"
         ];
 
-        const allPayments = await Payment.find({ status: 'Success', amount: { $gt: 0 } }).lean();
+        const formatDate = (value) => {
+            if (!value) return '-';
+            const d = new Date(value);
+            if (Number.isNaN(d.getTime())) return '-';
+            // Show the date in Indian time
+            const ist = new Date(d.getTime() + 5.5 * 60 * 60 * 1000);
+            return `${String(ist.getUTCDate()).padStart(2, '0')}-${monthNames[ist.getUTCMonth()].slice(0, 3)}-${ist.getUTCFullYear()}`;
+        };
+
+        const allPayments = await Payment.find({ status: { $regex: /^success$/i }, amount: { $gt: 0 } }).lean();
         const userPaymentsMap = {};
         for (const p of allPayments) {
             if (p.userId) {
                 const uid = p.userId.toString();
-                if (!userPaymentsMap[uid]) userPaymentsMap[uid] = [];
-                userPaymentsMap[uid].push(p);
+                if (!userPaymentsMap[uid]) userPaymentsMap[uid] = {};
+                userPaymentsMap[uid][normalizeLabel(p.month)] = p;
             }
         }
 
+        const baseColumns = [
+            { header: 'S.No', key: 'sno', width: 8 },
+            { header: 'Student Name', key: 'name', width: 25 },
+            { header: 'Enrollment No', key: 'enrollmentNo', width: 18 },
+            { header: 'Gender', key: 'gender', width: 10 },
+            { header: 'Year', key: 'year', width: 8 },
+            { header: 'Room', key: 'room', width: 10 },
+            { header: 'Course', key: 'course', width: 15 },
+            { header: 'Phone Number', key: 'phonenumber', width: 16 },
+            { header: 'Father Phone', key: 'fatherPhone', width: 16 },
+        ];
+
+        const baseRow = (u, sno) => ({
+            sno,
+            name: u.name,
+            enrollmentNo: u.enrollmentNo || 'N/A',
+            gender: u.gender || 'N/A',
+            year: u.year || '1',
+            room: u.room || 'N/A',
+            course: u.course || 'N/A',
+            phonenumber: u.phonenumber || 'N/A',
+            fatherPhone: (u.fatherPhone && String(u.fatherPhone).trim() !== '') ? u.fatherPhone : 'N/A',
+        });
+
+        const sendWorkbook = async (fileName) => {
+            sheet.getRow(1).font = { bold: true };
+            sheet.views = [{ state: 'frozen', ySplit: 1 }];
+            res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+            res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+            // ✅ Expose headers so Flutter Web can access file download streams
+            res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+            await workbook.xlsx.write(res);
+            return res.end();
+        };
+
         if (month === 'All Year') {
+            // Automatic month list: first fee month → current month, plus any prepaid future month
+            const config = getPaymentConfig();
+            const monthSet = new Set(monthRange(config.firstMonth, 0));
+            for (const p of allPayments) {
+                const label = normalizeLabel(p.month);
+                if (monthKey(label) >= monthKey(config.firstMonth)) monthSet.add(label);
+            }
+            const months = [...monthSet].sort((a, b) => monthKey(a) - monthKey(b));
+            const currentLabel = `${monthNames[currentMonthParts().month]} ${currentMonthParts().year}`;
+
             sheet.columns = [
-                { header: 'S.No', key: 'sno', width: 8 },
-                { header: 'Student Name', key: 'name', width: 25 },
-                { header: 'Gender', key: 'gender', width: 12 },
-                { header: 'Year', key: 'year', width: 10 },
-                { header: 'Room', key: 'room', width: 12 },
-                { header: 'Course', key: 'course', width: 15 },
-                { header: 'Phone Number', key: 'phonenumber', width: 16 },
-                { header: 'Father Phone', key: 'fatherPhone', width: 16 },
-                { header: 'Aug Payment', key: 'augPay', width: 20 },
-                { header: 'Sep Payment', key: 'sepPay', width: 20 },
-                { header: 'Oct Payment', key: 'octPay', width: 20 },
-                { header: 'Status', key: 'status', width: 15 },
+                ...baseColumns,
+                ...months.map((m, i) => ({ header: `${m.slice(0, 3)} ${m.split(' ')[1]} Payment`, key: `m${i}`, width: 24 })),
+                { header: 'Status', key: 'status', width: 18 },
             ];
 
             let rowCount = 0;
             users.forEach((u) => {
                 const uidStr = u._id ? u._id.toString() : '';
-                const userPays = userPaymentsMap[uidStr] || [];
-                const augPayRecord = userPays.find(p => p.month?.toLowerCase().includes('august'));
-                const sepPayRecord = userPays.find(p => p.month?.toLowerCase().includes('september'));
-                const octPayRecord = userPays.find(p => p.month?.toLowerCase().includes('october'));
-
-                const isPaidAll = (augPayRecord && sepPayRecord && octPayRecord);
-
-                if (isUnpaidFilterActive && isPaidAll) {
-                    return;
-                }
+                const pays = userPaymentsMap[uidStr] || {};
+                const isPaidAll = months.every((m) => pays[m]);
+                if (isUnpaidFilterActive && isPaidAll) return;
 
                 rowCount++;
-                sheet.addRow({
-                    sno: rowCount,
-                    name: u.name,
-                    gender: u.gender || 'N/A',
-                    year: u.year || '1',
-                    room: u.room || 'N/A',
-                    course: u.course || 'N/A',
-                    phonenumber: u.phonenumber || 'N/A',
-                    fatherPhone: (u.fatherPhone && u.fatherPhone.trim() !== '') ? u.fatherPhone : 'N/A',
-                    augPay: augPayRecord ? `₹${augPayRecord.amount} [${augPayRecord.transactionId || 'Cash'}]` : 'UNPAID',
-                    sepPay: sepPayRecord ? `₹${sepPayRecord.amount} [${sepPayRecord.transactionId || 'Cash'}]` : 'UNPAID',
-                    octPay: octPayRecord ? `₹${octPayRecord.amount} [${octPayRecord.transactionId || 'Cash'}]` : 'UNPAID',
-                    status: !octPayRecord ? 'UNPAID OCT' : 'PAID OCT',
+                const row = baseRow(u, rowCount);
+                months.forEach((m, i) => {
+                    const p = pays[m];
+                    row[`m${i}`] = p ? `₹${p.amount} [${p.transactionId || 'Cash'}]` : 'UNPAID';
                 });
+                const curShort = currentLabel.slice(0, 3).toUpperCase();
+                row.status = pays[currentLabel] ? `PAID ${curShort}` : `UNPAID ${curShort}`;
+                sheet.addRow(row);
             });
 
-            const fileName = `Chef_${isUnpaidFilterActive ? 'UNPAID_' : ''}Yearly_Report_${yearGroup || 'All'}.xlsx`;
-
-            res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-            res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
-            // ✅ Expose headers so Flutter Web can access file download streams
-            res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
-
-            await workbook.xlsx.write(res);
-            return res.end();
-        } else {
-            const targetMonth = month || 'October 2026';
-            const targetMonthPrefix = targetMonth.split(' ')[0].toLowerCase();
-
-            sheet.columns = [
-                { header: 'S.No', key: 'sno', width: 8 },
-                { header: 'Student Name', key: 'name', width: 25 },
-                { header: 'Gender', key: 'gender', width: 12 },
-                { header: 'Year', key: 'year', width: 10 },
-                { header: 'Room', key: 'room', width: 12 },
-                { header: 'Course', key: 'course', width: 15 },
-                { header: 'Phone Number', key: 'phonenumber', width: 16 },
-                { header: 'Father Phone', key: 'fatherPhone', width: 16 },
-                { header: `${targetMonth} Status`, key: 'monthStatus', width: 18 },
-                { header: 'Amount', key: 'amount', width: 14 },
-                { header: 'UTR / Txn ID', key: 'txnId', width: 25 },
-                { header: 'Payment Date', key: 'paidAt', width: 18 },
-            ];
-
-            let rowCount = 0;
-            users.forEach((u) => {
-                const uidStr = u._id ? u._id.toString() : '';
-                const userPays = userPaymentsMap[uidStr] || [];
-                const pay = userPays.find(p => p.month?.toLowerCase().includes(targetMonthPrefix));
-                const isPaid = (pay !== undefined && pay !== null);
-
-                if (isUnpaidFilterActive && isPaid) {
-                    return;
-                }
-
-                let formattedDate = '-';
-                if (pay && pay.paidAt) {
-                    const d = new Date(pay.paidAt);
-                    const day = String(d.getDate()).padStart(2, '0');
-                    const monthStr = monthNames[d.getMonth()].slice(0, 3);
-                    const year = d.getFullYear();
-                    formattedDate = `${day}-${monthStr}-${year}`;
-                }
-
-                rowCount++;
-                sheet.addRow({
-                    sno: rowCount,
-                    name: u.name,
-                    gender: u.gender || 'N/A',
-                    year: u.year || '1',
-                    room: u.room || 'N/A',
-                    course: u.course || 'N/A',
-                    phonenumber: u.phonenumber || 'N/A',
-                    fatherPhone: (u.fatherPhone && u.fatherPhone.trim() !== '') ? u.fatherPhone : 'N/A',
-                    monthStatus: isPaid ? 'PAID' : 'UNPAID',
-                    amount: isPaid ? `₹${pay.amount}` : '0',
-                    txnId: isPaid ? (pay.transactionId || 'Cash') : '-',
-                    paidAt: formattedDate,
-                });
-            });
-
-            const fileName = `Chef_${isUnpaidFilterActive ? 'UNPAID_' : ''}Mess_Report_${yearGroup || 'All'}_${targetMonth.replace(/\s+/g, '_')}.xlsx`;
-
-            res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-            res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
-            // ✅ Expose headers so Flutter Web can access file download streams
-            res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
-
-            await workbook.xlsx.write(res);
-            return res.end();
+            return sendWorkbook(`Chef_${isUnpaidFilterActive ? 'UNPAID_' : ''}Yearly_Report_${yearGroup || 'All'}.xlsx`);
         }
+
+        const targetMonth = normalizeLabel(month || `${monthNames[currentMonthParts().month]} ${currentMonthParts().year}`);
+
+        sheet.columns = [
+            ...baseColumns,
+            { header: `${targetMonth} Status`, key: 'monthStatus', width: 18 },
+            { header: 'Amount', key: 'amount', width: 12 },
+            { header: 'UTR / Txn ID', key: 'txnId', width: 22 },
+            { header: 'Payment Date', key: 'paidAt', width: 16 },
+            { header: 'Plan', key: 'plan', width: 12 },
+            { header: 'Mode', key: 'mode', width: 14 },
+            { header: 'Screenshot', key: 'screenshot', width: 40 },
+        ];
+
+        let rowCount = 0;
+        users.forEach((u) => {
+            const uidStr = u._id ? u._id.toString() : '';
+            const pay = (userPaymentsMap[uidStr] || {})[targetMonth];
+            const isPaid = Boolean(pay);
+            if (isUnpaidFilterActive && isPaid) return;
+
+            rowCount++;
+            const row = {
+                ...baseRow(u, rowCount),
+                monthStatus: isPaid ? 'PAID' : 'UNPAID',
+                amount: isPaid ? `₹${pay.amount}` : '0',
+                txnId: isPaid ? (pay.transactionId || 'Cash') : '-',
+                paidAt: isPaid ? formatDate(pay.paidAt) : '-',
+                plan: isPaid ? `${pay.planMonths || 1} Month${(pay.planMonths || 1) > 1 ? 's' : ''}` : '-',
+                mode: isPaid ? (pay.source === 'screenshot' ? 'UPI Screenshot' : pay.method === 'offline' ? 'Manual / Cash' : 'Online') : '-',
+                screenshot: isPaid && pay.screenshotUrl ? { text: 'View screenshot', hyperlink: pay.screenshotUrl } : '-',
+            };
+            sheet.addRow(row);
+        });
+
+        return sendWorkbook(`Chef_${isUnpaidFilterActive ? 'UNPAID_' : ''}Mess_Report_${yearGroup || 'All'}_${targetMonth.replace(/\s+/g, '_')}.xlsx`);
     } catch (error) {
         console.error("Excel export error:", error);
         res.status(500).json({ message: "Failed to generate Excel report" });

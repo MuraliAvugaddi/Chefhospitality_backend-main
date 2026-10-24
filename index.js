@@ -15,7 +15,15 @@ const dayScholarRoute = require('./Routes/UserRoutes/dayschorls_routes');
 const dayScholarAdminRoute = require('./Routes/AdimeRoutes/dayScholreshistory');
 const menuRoute = require('./Routes/AdimeRoutes/menuRoute');
 const feedbackRoute = require('./Routes/UserRoutes/feedbackRoutes');
-const systemNoticeRoute = require('./Routes/AdimeRoutes/systemNoticeRoute'); // ✅ NEW
+// ✅ Works with BOTH names: your Mac has systemConfigRoute.js, GitHub had systemNoticeRoute.js
+const fs = require('fs');
+const path = require('path');
+const systemNoticeRoute = fs.existsSync(path.join(__dirname, 'Routes/AdimeRoutes/systemConfigRoute.js'))
+    ? require('./Routes/AdimeRoutes/systemConfigRoute')
+    : require('./Routes/AdimeRoutes/systemNoticeRoute');
+const paymentRoute = require('./Routes/UserRoutes/paymentRoute');                 // ✅ Screenshot payments (student)
+const paymentReviewRoute = require('./Routes/AdimeRoutes/paymentReviewRoute');    // ✅ Screenshot payments (admin)
+const appVersionRoute = require('./Routes/UserRoutes/appVersionRoute');           // ✅ App update check
 
 // 1. Initialize Express App
 const app = express();
@@ -28,8 +36,9 @@ app.use(cors({
 }));
 
 // Body parsers
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// 10mb so students can upload payment screenshots (sent as base64)
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // 3. Create HTTP Server for Socket.io
 const server = http.createServer(app);
@@ -88,6 +97,13 @@ app.use('/api/admin', feedbackRoute);
 
 // ✅ System / Payment Notice -> GET /api/system/notice
 app.use('/api', systemNoticeRoute);
+
+// ✅ Screenshot payments
+app.use('/api/payments', paymentRoute);          // student: /config, /submit, /my-submissions, /my-receipts
+app.use('/api/admin', paymentReviewRoute);       // admin: /payment-submissions, /students/:id/receipts
+
+// ✅ App update check -> GET /api/app-version
+app.use('/api', appVersionRoute);
 
 // ============================================================
 // JSON 404 HANDLER
