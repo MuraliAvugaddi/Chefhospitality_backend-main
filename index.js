@@ -15,12 +15,7 @@ const dayScholarRoute = require('./Routes/UserRoutes/dayschorls_routes');
 const dayScholarAdminRoute = require('./Routes/AdimeRoutes/dayScholreshistory');
 const menuRoute = require('./Routes/AdimeRoutes/menuRoute');
 const feedbackRoute = require('./Routes/UserRoutes/feedbackRoutes');
-// ✅ Works with BOTH names: your Mac has systemConfigRoute.js, GitHub had systemNoticeRoute.js
-const fs = require('fs');
-const path = require('path');
-const systemNoticeRoute = fs.existsSync(path.join(__dirname, 'Routes/AdimeRoutes/systemConfigRoute.js'))
-    ? require('./Routes/AdimeRoutes/systemConfigRoute')
-    : require('./Routes/AdimeRoutes/systemNoticeRoute');
+const systemNoticeRoute = require('./Routes/AdimeRoutes/systemNoticeRoute');
 const paymentRoute = require('./Routes/UserRoutes/paymentRoute');                 // ✅ Screenshot payments (student)
 const paymentReviewRoute = require('./Routes/AdimeRoutes/paymentReviewRoute');    // ✅ Screenshot payments (admin)
 const appVersionRoute = require('./Routes/UserRoutes/appVersionRoute');           // ✅ App update check
